@@ -147,7 +147,7 @@ For more end-to-end walkthroughs, see [Examples](./tutorials/examples.md).
 
 - [Creating Templates from OCI Images](./tutorials/template-from-image.md) — customize your sandbox environment
 - [Multi-Node Cluster Deployment](./multi-node-deploy.md) — scale to multiple machines
-- [CubeProxy TLS](./cubeproxy-tls.md) — TLS configuration options
+- [HTTPS & Domain Resolution](./https-and-domain.md) — TLS configuration options
 - [Authentication](./authentication.md) — enable API authentication
 
 ## Appendix: Build from Source

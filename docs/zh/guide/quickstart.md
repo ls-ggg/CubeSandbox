@@ -150,7 +150,7 @@ with Sandbox.create(template=os.environ["CUBE_TEMPLATE_ID"]) as sandbox:
 
 - [从 OCI 镜像制作模板](./tutorials/template-from-image.md) — 自定义沙箱运行环境
 - [多机集群部署](./multi-node-deploy.md) — 扩展到多台机器
-- [CubeProxy TLS 配置](./cubeproxy-tls.md) — TLS 配置选项
+- [HTTPS 证书与域名解析](./https-and-domain.md) — TLS 配置选项
 - [鉴权](./authentication.md) — 启用 API 鉴权
 
 ## 附录：从源码构建
