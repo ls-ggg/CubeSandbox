@@ -112,6 +112,6 @@ It starts a lightweight local proxy that intercepts E2B SDK data-plane requests 
 - **No wildcard DNS needed**: no `*.cube.app` record required on the developer machine
 - **No certificate trust needed**: the sidecar skips server certificate verification by default (`CUBE_REMOTE_PROXY_VERIFY_SSL=false`)
 
-See: [e2b-dev-sidecar example](../../examples/e2b-dev-sidecar/README.md)
+See: [e2b-dev-sidecar example](https://github.com/tencentcloud/CubeSandbox/tree/master/examples/e2b-dev-sidecar)
 
 > **Note:** e2b-dev-sidecar is a minimal dev-only implementation and is not intended for production use.
