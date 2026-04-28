@@ -2,16 +2,10 @@ FROM cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpin
 
 LABEL maintainer="staryxchen <staryxchen@tencent.com>"
 
-RUN mkdir -p /data/log/cube-proxy/ \
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tencentyun.com/g' /etc/apk/repositories \
+    && mkdir -p /data/log/cube-proxy/ \
     && apk update \
-    && apk add tcpdump \
-    && apk add vim \
-    && apk add tzdata \
-    && apk add python3 \
-    && apk add py3-pip \
-    && apk add bpftrace busybox curl ethtool file gawk inetutils-telnet \
-        iperf iperf3 iproute2 netcat-openbsd net-tools sysstat wget \
-    && pip3 install pythonping requests \
+    && apk add --no-cache tzdata curl wget \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone
 

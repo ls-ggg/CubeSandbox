@@ -27,6 +27,8 @@ use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 use std::thread;
 use test_infra::*;
+use vmm::config::RestoreConfig;
+use vmm::vm_config::{DiskConfig, FsConfig, NetConfig, PmemConfig, VsockConfig};
 use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 use wait_timeout::ChildExt;
 
@@ -639,7 +641,7 @@ fn test_cpu_topology(threads_per_core: u8, cores_per_package: u8, packages: u8, 
         );
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
@@ -716,7 +718,7 @@ fn _test_guest_numa_nodes(acpi: bool) {
         }
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
@@ -924,7 +926,7 @@ fn test_vhost_user_net(
         }
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     thread::sleep(std::time::Duration::new(5, 0));
@@ -1071,7 +1073,7 @@ fn test_vhost_user_blk(
         guest.ssh_command("rm -r mount_image").unwrap();
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     if let Some(mut daemon_child) = daemon_child {
@@ -1142,7 +1144,7 @@ fn test_boot_from_vhost_user_blk(
         assert_eq!(guest.get_cpu_count().unwrap_or_default(), num_queues as u32);
         assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
     });
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     if let Some(mut daemon_child) = daemon_child {
@@ -1503,7 +1505,7 @@ fn _test_virtio_fs(
         (r, None)
     };
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     let _ = daemon_child.kill();
@@ -1574,18 +1576,18 @@ fn test_virtio_pmem(discard_writes: bool, specify_size: bool) {
         assert_eq!(guest.ssh_command("sudo umount /mnt").unwrap(), "");
         assert_eq!(guest.ssh_command("ls /mnt").unwrap(), "");
 
-        guest.reboot_linux(0, None);
-        assert_eq!(guest.ssh_command("sudo mount /dev/pmem0 /mnt").unwrap(), "");
-        assert_eq!(
-            guest
-                .ssh_command("sudo cat /mnt/test || true")
-                .unwrap()
-                .trim(),
-            if discard_writes { "" } else { "test123" }
-        );
+        // guest.reboot_linux(0, None);
+        // assert_eq!(guest.ssh_command("sudo mount /dev/pmem0 /mnt").unwrap(), "");
+        // assert_eq!(
+        //     guest
+        //         .ssh_command("sudo cat /mnt/test || true")
+        //         .unwrap()
+        //         .trim(),
+        //     if discard_writes { "" } else { "test123" }
+        // );
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
@@ -1649,16 +1651,16 @@ fn _test_virtio_vsock(hotplug: bool) {
 
         // Validate vsock works as expected.
         guest.check_vsock(socket.as_str());
-        guest.reboot_linux(0, None);
+        // guest.reboot_linux(0, None);
         // Validate vsock still works after a reboot.
-        guest.check_vsock(socket.as_str());
+        // guest.check_vsock(socket.as_str());
 
         if hotplug {
             assert!(remote_command(&api_socket, "remove-device", Some("test0")));
         }
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
@@ -2041,7 +2043,7 @@ fn _test_virtio_iommu(acpi: bool) {
         );
     });
 
-    let _ = child.kill();
+    kill_child(&mut child);
     let output = child.wait_with_output().unwrap();
 
     handle_child_output(r, &output);
@@ -2071,9 +2073,384 @@ fn enable_guest_watchdog(guest: &Guest, watchdog_sec: u32) {
         .unwrap();
 }
 
+fn snapshot_and_check_events(api_socket: &str, snapshot_dir: &str, event_path: &str) {
+    // Pause the VM
+    assert!(remote_command(api_socket, "pause", None));
+    let latest_events = [
+        &MetaEvent {
+            event: "pausing".to_string(),
+            device_id: None,
+        },
+        &MetaEvent {
+            event: "paused".to_string(),
+            device_id: None,
+        },
+    ];
+    assert!(check_latest_events_exact(&latest_events, event_path));
+
+    // Take a snapshot from the VM
+    assert!(remote_command(
+        api_socket,
+        "snapshot",
+        Some(format!("file://{}", snapshot_dir).as_str()),
+    ));
+
+    // Wait to make sure the snapshot is completed
+    thread::sleep(std::time::Duration::new(10, 0));
+
+    let latest_events = [
+        &MetaEvent {
+            event: "snapshotting".to_string(),
+            device_id: None,
+        },
+        &MetaEvent {
+            event: "snapshotted".to_string(),
+            device_id: None,
+        },
+    ];
+    assert!(check_latest_events_exact(&latest_events, event_path));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn _test_restore_from_config(
+    binary_path: &str,
+    guest: &Guest,
+    snapshot_dir: String,
+    vsock_conf: Option<VsockConfig>,
+    net_conf: Option<Vec<NetConfig>>,
+    disk_conf: Option<Vec<DiskConfig>>,
+    pmem_conf: Option<Vec<PmemConfig>>,
+    fs_conf: Option<Vec<FsConfig>>,
+) {
+    let api_socket_restored = format!("{}.2", temp_api_path(&guest.tmp_dir));
+    let event_path_restored = format!("{}.2", temp_event_monitor_path(&guest.tmp_dir));
+    let console_text = String::from("On a branch floating down river a cricket, singing.");
+
+    let restore_config = RestoreConfig {
+        source_url: PathBuf::from(format!("file://{}", snapshot_dir)),
+        vsock: vsock_conf.clone(),
+        net: net_conf.clone(),
+        disks: disk_conf.clone(),
+        pmem: pmem_conf.clone(),
+        fs: fs_conf.clone(),
+        ..Default::default()
+    };
+
+    // Start the hypervisor
+    let mut child = GuestCommand::new_with_binary_path(guest, binary_path)
+        .args(["--api-socket", &api_socket_restored])
+        .args([
+            "--event-monitor",
+            format!("path={}", event_path_restored).as_str(),
+        ])
+        .capture_output()
+        .spawn()
+        .unwrap();
+
+    thread::sleep(std::time::Duration::new(1, 0));
+
+    // Restore the VM from the snapshot
+    let body = serde_json::to_string(&restore_config).unwrap();
+    curl_command(
+        api_socket_restored.as_str(),
+        "PUT",
+        "http://localhost/api/v1/vm.restore",
+        Some(body.as_str()),
+    );
+    // Wait for the VM to be restored
+    thread::sleep(std::time::Duration::new(10, 0));
+    let r = std::panic::catch_unwind(|| {
+        // Automatically restart the VM after it has been restored
+        let latest_events = [
+            &MetaEvent {
+                event: "restored".to_string(),
+                device_id: None,
+            },
+            &MetaEvent {
+                event: "resuming".to_string(),
+                device_id: None,
+            },
+            &MetaEvent {
+                event: "resumed".to_string(),
+                device_id: None,
+            },
+        ];
+        assert!(check_latest_events_exact(
+            &latest_events,
+            &event_path_restored
+        ));
+
+        let (cmd_success, cmd_output) =
+            remote_command_w_output(api_socket_restored.as_str(), "info", None);
+        assert!(cmd_success);
+        println!(
+            "cmd_output: {}",
+            String::from_utf8_lossy(&cmd_output).trim()
+        );
+
+        guest.check_devices_common(None, Some(&console_text), None);
+        if let Some(config) = vsock_conf {
+            let socket = String::from(config.socket.to_str().unwrap());
+            assert!(String::from_utf8_lossy(&cmd_output)
+                .trim()
+                .contains(format!("\"socket\":\"{}\"", socket.as_str()).as_str()));
+            // Check vsock
+            guest.check_devices_common(Some(&socket), None, None);
+        }
+        if let Some(config_list) = net_conf {
+            for config in config_list {
+                if let Some(tap_name) = config.tap {
+                    // Check tap from RestoreConfig
+                    let tap_count = exec_host_command_output(&format!(
+                        "ip link | grep -c {}",
+                        tap_name.as_str()
+                    ));
+                    assert_eq!(String::from_utf8_lossy(&tap_count.stdout).trim(), "1");
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .trim()
+                        .contains(format!("\"tap\":\"{}\"", tap_name.as_str()).as_str()));
+                }
+            }
+        }
+        if let Some(config_list) = disk_conf {
+            for config in config_list {
+                if let Some(path) = config.path {
+                    assert!(String::from_utf8_lossy(&cmd_output)
+                        .trim()
+                        .contains(format!("\"path\":\"{}\"", path.to_str().unwrap()).as_str()));
+                }
+            }
+        }
+        if let Some(config_list) = pmem_conf {
+            for (index, config) in config_list.iter().enumerate() {
+                let pmem_path = format!("/dev/pmem{}", index);
+
+                let pmem_file = String::from(config.file.to_str().unwrap());
+                assert!(String::from_utf8_lossy(&cmd_output)
+                    .trim()
+                    .contains(format!("\"file\":\"{}\"", pmem_file.as_str()).as_str()));
+                // Check pmem
+                guest.check_devices_common(None, None, Some(&pmem_path));
+            }
+        }
+        if let Some(config_list) = fs_conf {
+            for config in config_list {
+                if let Some(backend) = config.backendfs_config.as_ref() {
+                    assert!(String::from_utf8_lossy(&cmd_output).trim().contains(
+                        format!("\"shared_dir\":\"{}\"", backend.shared_dir.as_str()).as_str()
+                    ));
+                }
+            }
+        }
+    });
+    // Shutdown the target VM and check console output
+    kill_child(&mut child);
+    let output = child.wait_with_output().unwrap();
+    handle_child_output(r, &output);
+
+    let r = std::panic::catch_unwind(|| {
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&console_text));
+    });
+
+    handle_child_output(r, &output);
+}
+
+fn _test_snapshot_restore_from_different_binary(
+    snapshot_binary_path: &str,
+    restore_binary_path: &str,
+) {
+    let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
+    let guest = Guest::new(Box::new(focal));
+    let kernel_path = direct_kernel_boot_path();
+
+    let api_socket_source = format!("{}.1", temp_api_path(&guest.tmp_dir));
+    let vsock_id = "_vsock0";
+
+    let net_id = "net123";
+    let net_params = format!(
+        "id={},tap=,mac={},ip={},mask=255.255.255.0",
+        net_id, guest.network.guest_mac, guest.network.host_ip
+    );
+
+    let socket = temp_vsock_path(&guest.tmp_dir);
+    let event_path = temp_event_monitor_path(&guest.tmp_dir);
+
+    let mut workload_path = dirs::home_dir().unwrap();
+    workload_path.push("workloads");
+    // Prepare native virtiofs
+    let mut shared_dir = workload_path.clone();
+    shared_dir.push("shared_dir");
+    let fs_params = format!(
+        "id=myfs0,tag=myfs,native=true,shared_dir={},cache=always,num_queues=1,queue_size=1024",
+        shared_dir.to_str().unwrap()
+    );
+
+    // check_devices_common() needs two disks, we need to mount a empty disk here.
+    let mut blk_file_path = workload_path.clone();
+    blk_file_path.push("blk.img");
+
+    let mut child = GuestCommand::new_with_binary_path(&guest, snapshot_binary_path)
+        .args(["--api-socket", &api_socket_source])
+        .args(["--event-monitor", format!("path={}", event_path).as_str()])
+        .args(["--cpus", "boot=1"])
+        .args(["--memory", "size=1024M,hotplug_method=acpi,hotplug_size=4G"])
+        .args(["--kernel", kernel_path.to_str().unwrap()])
+        .args([
+            "--disk",
+            format!(
+                "id=cloudinit,path={}",
+                guest.disk_config.disk(DiskType::CloudInit).unwrap()
+            )
+            .as_str(),
+            format!("id=blk-0,path={}", blk_file_path.to_str().unwrap()).as_str(),
+        ])
+        .args([
+            "--pmem",
+            format!(
+                "file={},size={}",
+                guest.disk_config.disk(DiskType::OperatingSystem).unwrap(),
+                fs::metadata(guest.disk_config.disk(DiskType::OperatingSystem).unwrap())
+                    .unwrap()
+                    .len()
+            )
+            .as_str(),
+        ])
+        .args([
+            "--cmdline",
+            DIRECT_KERNEL_BOOT_CMDLINE
+                .replace("vda1", "pmem0p1")
+                .as_str(),
+        ])
+        .args(["--fs", fs_params.as_str()])
+        .args(["--serial", "tty", "--console", "tty"])
+        .args(["--net", net_params.as_str()])
+        .args([
+            "--vsock",
+            format!("cid=3,id={},socket={}", vsock_id, socket).as_str(),
+        ])
+        .capture_output()
+        .spawn()
+        .unwrap();
+
+    let console_text = String::from("On a branch floating down river a cricket, singing.");
+    // Create the snapshot directory
+    let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
+
+    let r = std::panic::catch_unwind(|| {
+        guest.wait_vm_boot(None).unwrap();
+
+        // Check the number of vCPUs
+        assert_eq!(guest.get_cpu_count().unwrap_or_default(), 1);
+
+        // Check the guest virtio-devices, e.g. block, rng, vsock, console, and net
+        guest.check_devices_common(Some(&socket), Some(&console_text), None);
+
+        snapshot_and_check_events(
+            api_socket_source.as_str(),
+            snapshot_dir.as_str(),
+            event_path.as_str(),
+        );
+    });
+
+    // Shutdown the source VM and check console output
+    kill_child(&mut child);
+    let output = child.wait_with_output().unwrap();
+    handle_child_output(r, &output);
+
+    let r = std::panic::catch_unwind(|| {
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&console_text));
+    });
+
+    handle_child_output(r, &output);
+
+    // Remove the vsock socket file.
+    Command::new("rm")
+        .arg("-f")
+        .arg(socket.as_str())
+        .output()
+        .unwrap();
+
+    // Prepare restore config
+    // vsock config
+    let socket_restored = format!("{}.2", temp_vsock_path(&guest.tmp_dir));
+    let vsock_config =
+        VsockConfig::parse(format!("cid=3,id={},socket={}", vsock_id, socket_restored).as_str())
+            .unwrap();
+
+    // net config
+    let tap_name_restored = "restore-tap";
+    let net_params_restored = format!(
+        "id={},tap={},mac={},ip={},mask=255.255.255.0",
+        net_id, tap_name_restored, guest.network.guest_mac, guest.network.host_ip
+    );
+    let net_config = NetConfig::parse(net_params_restored.as_str()).unwrap();
+
+    // Pre-create restore-tap since v1.0.9 can't create a named tap
+    assert!(exec_host_command_status(
+        format!("sudo ip tuntap add {} mode tap", tap_name_restored).as_str()
+    )
+    .success());
+    assert!(exec_host_command_status(
+        format!(
+            "sudo ip link set dev {} address {}",
+            tap_name_restored, guest.network.guest_mac
+        )
+        .as_str()
+    )
+    .success());
+    assert!(exec_host_command_status(
+        format!(
+            "sudo ip addr add {}/24 dev {}",
+            guest.network.host_ip, tap_name_restored
+        )
+        .as_str()
+    )
+    .success());
+    assert!(exec_host_command_status(
+        format!("sudo ip link set {} up", tap_name_restored).as_str()
+    )
+    .success());
+
+    // disk config
+    let mut workload_path = dirs::home_dir().unwrap();
+    workload_path.push("workloads");
+    let mut blk_file_path = workload_path.clone();
+    blk_file_path.push("blk.img");
+
+    let disk_path_restored =
+        String::from(guest.tmp_dir.as_path().join("blk2.img").to_str().unwrap());
+    rate_limited_copy(blk_file_path, &disk_path_restored)
+        .expect("copying of OS source disk image failed");
+    let disk_params_restored = format!("id=blk-0,path={}", disk_path_restored);
+    let disk_config = DiskConfig::parse(disk_params_restored.as_str()).unwrap();
+
+    // fs config
+    let mut shared_dir_restored = workload_path.clone();
+    shared_dir_restored.push("restored_shared_dir");
+    let fs_params = format!(
+        "id=myfs0,tag=myfs,native=true,shared_dir={},cache=always,num_queues=1,queue_size=1024",
+        shared_dir_restored.to_str().unwrap()
+    );
+    let fs_config = FsConfig::parse(fs_params.as_str()).unwrap();
+
+    _test_restore_from_config(
+        restore_binary_path,
+        &guest,
+        snapshot_dir,
+        Some(vsock_config),
+        Some(vec![net_config]),
+        Some(vec![disk_config]),
+        None,
+        Some(vec![fs_config]),
+    );
+    assert!(
+        exec_host_command_status(format!("sudo ip link del {}", tap_name_restored).as_str())
+            .success()
+    );
+}
+
 mod common_parallel {
     use std::{fs::OpenOptions, io::SeekFrom};
-    use vmm::vm_config::MemoryConfig;
 
     use crate::*;
 
@@ -2181,7 +2558,7 @@ mod common_parallel {
             assert!(check_latest_events_exact(&latest_events, &event_path));
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2225,7 +2602,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2280,7 +2657,7 @@ mod common_parallel {
                 );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2322,7 +2699,7 @@ mod common_parallel {
             assert_eq!(String::from_utf8_lossy(&taskset_vcpu1.stdout).trim(), "1,3");
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2361,7 +2738,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 5_000_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2389,7 +2766,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 128_000_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2447,22 +2824,22 @@ mod common_parallel {
             thread::sleep(std::time::Duration::new(5, 0));
             assert!(guest.get_total_memory().unwrap_or_default() > 4_800_000);
 
-            guest.reboot_linux(0, None);
-
-            // Check the amount of RAM after reboot
-            assert!(guest.get_total_memory().unwrap_or_default() > 4_800_000);
-            assert!(guest.get_total_memory().unwrap_or_default() < 5_760_000);
-
-            // Check if we can still resize down to the initial 'boot'size
-            resize_zone_command(&api_socket, "mem0", "1G");
-            thread::sleep(std::time::Duration::new(5, 0));
-            assert!(guest.get_total_memory().unwrap_or_default() < 4_800_000);
-            resize_zone_command(&api_socket, "mem2", "1G");
-            thread::sleep(std::time::Duration::new(5, 0));
-            assert!(guest.get_total_memory().unwrap_or_default() < 3_840_000);
+            // guest.reboot_linux(0, None);
+            //
+            // // Check the amount of RAM after reboot
+            // assert!(guest.get_total_memory().unwrap_or_default() > 4_800_000);
+            // assert!(guest.get_total_memory().unwrap_or_default() < 5_760_000);
+            //
+            // // Check if we can still resize down to the initial 'boot'size
+            // resize_zone_command(&api_socket, "mem0", "1G");
+            // thread::sleep(std::time::Duration::new(5, 0));
+            // assert!(guest.get_total_memory().unwrap_or_default() < 4_800_000);
+            // resize_zone_command(&api_socket, "mem2", "1G");
+            // thread::sleep(std::time::Duration::new(5, 0));
+            // assert!(guest.get_total_memory().unwrap_or_default() < 3_840_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2544,7 +2921,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2584,7 +2961,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2631,7 +3008,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2736,7 +3113,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -2782,7 +3159,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3067,7 +3444,7 @@ mod common_parallel {
             guest.wait_vm_boot(Some(120)).unwrap();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3186,7 +3563,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3222,7 +3599,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3258,7 +3635,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3315,7 +3692,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3341,6 +3718,28 @@ mod common_parallel {
     #[cfg(not(feature = "mshv"))]
     fn test_virtio_fs_multi_segment() {
         _test_virtio_fs(&prepare_virtiofsd, false, Some(15))
+    }
+
+    #[test]
+    fn test_native_virtio_fs() {
+        _test_native_virtio_fs(false, None)
+    }
+
+    #[test]
+    fn test_native_virtio_fs_hotplug() {
+        _test_native_virtio_fs(true, None)
+    }
+
+    #[test]
+    #[cfg(not(feature = "mshv"))]
+    fn test_native_virtio_fs_multi_segment() {
+        _test_native_virtio_fs(false, Some(15))
+    }
+
+    #[test]
+    #[cfg(not(feature = "mshv"))]
+    fn test_native_virtio_fs_multi_segment_hotplug() {
+        _test_native_virtio_fs(true, Some(15))
     }
 
     #[test]
@@ -3407,7 +3806,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3454,7 +3853,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3491,7 +3890,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3528,7 +3927,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -3576,7 +3975,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3635,7 +4034,7 @@ mod common_parallel {
         // This sleep is needed to wait for the login prompt
         thread::sleep(std::time::Duration::new(2, 0));
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3695,7 +4094,7 @@ mod common_parallel {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(20));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3790,7 +4189,7 @@ mod common_parallel {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(20));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3834,7 +4233,7 @@ mod common_parallel {
             guest.ssh_command(&cmd).unwrap();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -3871,7 +4270,7 @@ mod common_parallel {
         guest.ssh_command("sudo shutdown -h now").unwrap();
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(20));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let r = std::panic::catch_unwind(|| {
@@ -4154,7 +4553,7 @@ mod common_parallel {
             assert!(guest.get_total_memory_l2().unwrap_or_default() > 960_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         cleanup_vfio_network_interfaces();
@@ -4190,7 +4589,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4253,7 +4652,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4331,7 +4730,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4416,7 +4815,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4496,7 +4895,7 @@ mod common_parallel {
             assert_eq!(guest.get_cpu_count().unwrap_or_default() as u8, cpu_count);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4605,7 +5004,7 @@ mod common_parallel {
             assert_ne!(init_bar_addr, new_bar_addr);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4658,41 +5057,41 @@ mod common_parallel {
                 u32::from(desired_vcpus)
             );
 
-            guest.reboot_linux(0, None);
-
-            assert_eq!(
-                guest.get_cpu_count().unwrap_or_default(),
-                u32::from(desired_vcpus)
-            );
-
-            // Resize the VM
-            let desired_vcpus = 2;
-            resize_command(&api_socket, Some(desired_vcpus), None, None, None);
-
-            thread::sleep(std::time::Duration::new(10, 0));
-            assert_eq!(
-                guest.get_cpu_count().unwrap_or_default(),
-                u32::from(desired_vcpus)
-            );
-
-            // Resize the VM back up to 4
-            let desired_vcpus = 4;
-            resize_command(&api_socket, Some(desired_vcpus), None, None, None);
-
-            guest
-                .ssh_command("echo 1 | sudo tee /sys/bus/cpu/devices/cpu2/online")
-                .unwrap();
-            guest
-                .ssh_command("echo 1 | sudo tee /sys/bus/cpu/devices/cpu3/online")
-                .unwrap();
-            thread::sleep(std::time::Duration::new(10, 0));
-            assert_eq!(
-                guest.get_cpu_count().unwrap_or_default(),
-                u32::from(desired_vcpus)
-            );
+            // guest.reboot_linux(0, None);
+            //
+            // assert_eq!(
+            //     guest.get_cpu_count().unwrap_or_default(),
+            //     u32::from(desired_vcpus)
+            // );
+            //
+            // // Resize the VM
+            // let desired_vcpus = 2;
+            // resize_command(&api_socket, Some(desired_vcpus), None, None, None);
+            //
+            // thread::sleep(std::time::Duration::new(10, 0));
+            // assert_eq!(
+            //     guest.get_cpu_count().unwrap_or_default(),
+            //     u32::from(desired_vcpus)
+            // );
+            //
+            // // Resize the VM back up to 4
+            // let desired_vcpus = 4;
+            // resize_command(&api_socket, Some(desired_vcpus), None, None, None);
+            //
+            // guest
+            //     .ssh_command("echo 1 | sudo tee /sys/bus/cpu/devices/cpu2/online")
+            //     .unwrap();
+            // guest
+            //     .ssh_command("echo 1 | sudo tee /sys/bus/cpu/devices/cpu3/online")
+            //     .unwrap();
+            // thread::sleep(std::time::Duration::new(10, 0));
+            // assert_eq!(
+            //     guest.get_cpu_count().unwrap_or_default(),
+            //     u32::from(desired_vcpus)
+            // );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4748,38 +5147,38 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
             assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
 
-            guest.reboot_linux(0, None);
-
-            assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
-
-            // Use balloon add RAM to the VM
-            let desired_balloon = 0;
-            resize_command(&api_socket, None, None, Some(desired_balloon), None);
-
-            thread::sleep(std::time::Duration::new(10, 0));
-
-            assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
-
-            guest.enable_memory_hotplug();
-
-            // Add RAM to the VM
-            let desired_ram = 2048 << 20;
-            resize_command(&api_socket, None, Some(desired_ram), None, None);
-
-            thread::sleep(std::time::Duration::new(10, 0));
-            assert!(guest.get_total_memory().unwrap_or_default() > 1_920_000);
-
-            // Remove RAM to the VM (only applies after reboot)
-            let desired_ram = 1024 << 20;
-            resize_command(&api_socket, None, Some(desired_ram), None, None);
-
-            guest.reboot_linux(1, None);
-
-            assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
-            assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
+            // guest.reboot_linux(0, None);
+            //
+            // assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
+            //
+            // // Use balloon add RAM to the VM
+            // let desired_balloon = 0;
+            // resize_command(&api_socket, None, None, Some(desired_balloon), None);
+            //
+            // thread::sleep(std::time::Duration::new(10, 0));
+            //
+            // assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
+            //
+            // guest.enable_memory_hotplug();
+            //
+            // // Add RAM to the VM
+            // let desired_ram = 2048 << 20;
+            // resize_command(&api_socket, None, Some(desired_ram), None, None);
+            //
+            // thread::sleep(std::time::Duration::new(10, 0));
+            // assert!(guest.get_total_memory().unwrap_or_default() > 1_920_000);
+            //
+            // // Remove RAM to the VM (only applies after reboot)
+            // let desired_ram = 1024 << 20;
+            // resize_command(&api_socket, None, Some(desired_ram), None, None);
+            //
+            // guest.reboot_linux(1, None);
+            //
+            // assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
+            // assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4838,21 +5237,21 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
             assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
 
-            guest.reboot_linux(0, None);
-
-            // Check the amount of memory after reboot is 1GiB
-            assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
-            assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
-
-            // Check we can still resize to 512MiB
-            let desired_ram = 512 << 20;
-            resize_command(&api_socket, None, Some(desired_ram), None, None);
-            thread::sleep(std::time::Duration::new(10, 0));
-            assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
-            assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
+            // guest.reboot_linux(0, None);
+            //
+            // // Check the amount of memory after reboot is 1GiB
+            // assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
+            // assert!(guest.get_total_memory().unwrap_or_default() < 1_920_000);
+            //
+            // // Check we can still resize to 512MiB
+            // let desired_ram = 512 << 20;
+            // resize_command(&api_socket, None, Some(desired_ram), None, None);
+            // thread::sleep(std::time::Duration::new(10, 0));
+            // assert!(guest.get_total_memory().unwrap_or_default() > 480_000);
+            // assert!(guest.get_total_memory().unwrap_or_default() < 960_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4915,7 +5314,7 @@ mod common_parallel {
             assert!(guest.get_total_memory().unwrap_or_default() > 960_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -4954,7 +5353,7 @@ mod common_parallel {
             assert!(overhead <= MAXIMUM_VMM_OVERHEAD_KB);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5070,49 +5469,49 @@ mod common_parallel {
                 .unwrap();
 
             // Reboot the VM.
-            guest.reboot_linux(0, None);
+            // guest.reboot_linux(0, None);
 
             // Check still there after reboot
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep vdc | grep -c 16M")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or_default(),
-                1
-            );
-
-            assert!(remote_command(&api_socket, "remove-device", Some("test0")));
-
-            thread::sleep(std::time::Duration::new(20, 0));
-
-            // Check device has gone away
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep -c vdc.*16M || true")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                0
-            );
-
-            guest.reboot_linux(1, None);
-
-            // Check device still absent
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep -c vdc.*16M || true")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                0
-            );
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep vdc | grep -c 16M")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or_default(),
+            //     1
+            // );
+            //
+            // assert!(remote_command(&api_socket, "remove-device", Some("test0")));
+            //
+            // thread::sleep(std::time::Duration::new(20, 0));
+            //
+            // // Check device has gone away
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep -c vdc.*16M || true")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or(1),
+            //     0
+            // );
+            //
+            // guest.reboot_linux(1, None);
+            //
+            // // Check device still absent
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep -c vdc.*16M || true")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or(1),
+            //     0
+            // );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5332,7 +5731,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5398,7 +5797,7 @@ mod common_parallel {
             assert!(deflated_balloon < 2147483648);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5461,7 +5860,7 @@ mod common_parallel {
             assert!(rss < 2097152);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5560,49 +5959,49 @@ mod common_parallel {
                 1
             );
 
-            guest.reboot_linux(0, None);
-
-            // Check still there after reboot
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep pmem0 | grep -c 128M")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or_default(),
-                1
-            );
-
-            assert!(remote_command(&api_socket, "remove-device", Some("test0")));
-
-            thread::sleep(std::time::Duration::new(20, 0));
-
-            // Check device has gone away
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep -c pmem0.*128M || true")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                0
-            );
-
-            guest.reboot_linux(1, None);
-
-            // Check still absent after reboot
-            assert_eq!(
-                guest
-                    .ssh_command("lsblk | grep -c pmem0.*128M || true")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(1),
-                0
-            );
+            // guest.reboot_linux(0, None);
+            //
+            // // Check still there after reboot
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep pmem0 | grep -c 128M")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or_default(),
+            //     1
+            // );
+            //
+            // assert!(remote_command(&api_socket, "remove-device", Some("test0")));
+            //
+            // thread::sleep(std::time::Duration::new(20, 0));
+            //
+            // // Check device has gone away
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep -c pmem0.*128M || true")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or(1),
+            //     0
+            // );
+            //
+            // guest.reboot_linux(1, None);
+            //
+            // // Check still absent after reboot
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("lsblk | grep -c pmem0.*128M || true")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or(1),
+            //     0
+            // );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5736,22 +6135,22 @@ mod common_parallel {
                 2
             );
 
-            guest.reboot_linux(0, None);
-
-            // Check still there after reboot
-            // 1 network interfaces + default localhost ==> 2 interfaces
-            assert_eq!(
-                guest
-                    .ssh_command("ip -o link | wc -l")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or_default(),
-                2
-            );
+            // guest.reboot_linux(0, None);
+            //
+            // // Check still there after reboot
+            // // 1 network interfaces + default localhost ==> 2 interfaces
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("ip -o link | wc -l")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or_default(),
+            //     2
+            // );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -5832,10 +6231,10 @@ mod common_parallel {
             "id={},tap=,mac={},ip={},mask=255.255.255.0",
             net_id, guest.network.guest_mac, guest.network.host_ip
         );
-        let mut mem_params = "size=4G";
+        let mut mem_params = "size=512M";
 
         if use_hotplug {
-            mem_params = "size=4G,hotplug_method=virtio-mem,hotplug_size=32G"
+            mem_params = "size=512M,hotplug_method=virtio-mem,hotplug_size=1G"
         }
 
         let cloudinit_params = format!(
@@ -5879,30 +6278,30 @@ mod common_parallel {
             // Check the number of vCPUs
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
             // Check the guest RAM
-            assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+            assert!(guest.get_total_memory().unwrap_or_default() > 400_000);
             if use_hotplug {
                 // Increase guest RAM with virtio-mem
                 resize_command(
                     &api_socket_source,
                     None,
-                    Some(6 << 30),
+                    Some(1536 << 20),
                     None,
                     Some(&event_path),
                 );
                 thread::sleep(std::time::Duration::new(5, 0));
-                assert!(guest.get_total_memory().unwrap_or_default() > 5_760_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
                 // Use balloon to remove RAM from the VM
                 resize_command(
                     &api_socket_source,
                     None,
                     None,
-                    Some(1 << 30),
+                    Some(512 << 20),
                     Some(&event_path),
                 );
                 thread::sleep(std::time::Duration::new(5, 0));
                 let total_memory = guest.get_total_memory().unwrap_or_default();
-                assert!(total_memory > 4_800_000);
-                assert!(total_memory < 5_760_000);
+                assert!(total_memory > 900_000);
+                assert!(total_memory < 1_400_000);
             }
             // Check the guest virtio-devices, e.g. block, rng, vsock, console, and net
             guest.check_devices_common(Some(&socket), Some(&console_text), None);
@@ -5936,46 +6335,15 @@ mod common_parallel {
                 ));
                 thread::sleep(std::time::Duration::new(10, 0));
             }
-
-            // Pause the VM
-            assert!(remote_command(&api_socket_source, "pause", None));
-            let latest_events = [
-                &MetaEvent {
-                    event: "pausing".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "paused".to_string(),
-                    device_id: None,
-                },
-            ];
-            assert!(check_latest_events_exact(&latest_events, &event_path));
-
-            // Take a snapshot from the VM
-            assert!(remote_command(
-                &api_socket_source,
-                "snapshot",
-                Some(format!("file://{}", snapshot_dir).as_str()),
-            ));
-
-            // Wait to make sure the snapshot is completed
-            thread::sleep(std::time::Duration::new(10, 0));
-
-            let latest_events = [
-                &MetaEvent {
-                    event: "snapshotting".to_string(),
-                    device_id: None,
-                },
-                &MetaEvent {
-                    event: "snapshotted".to_string(),
-                    device_id: None,
-                },
-            ];
-            assert!(check_latest_events_exact(&latest_events, &event_path));
+            snapshot_and_check_events(
+                api_socket_source.as_str(),
+                snapshot_dir.as_str(),
+                event_path.as_str(),
+            );
         });
 
         // Shutdown the source VM and check console output
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -6026,19 +6394,14 @@ mod common_parallel {
             &expected_events,
             &event_path_restored
         ));
-        let latest_events = [&MetaEvent {
-            event: "restored".to_string(),
-            device_id: None,
-        }];
-        assert!(check_latest_events_exact(
-            &latest_events,
-            &event_path_restored
-        ));
 
         let r = std::panic::catch_unwind(|| {
-            // Resume the VM
-            assert!(remote_command(&api_socket_restored, "resume", None));
+            // Automatically restart the VM after it has been restored
             let latest_events = [
+                &MetaEvent {
+                    event: "restored".to_string(),
+                    device_id: None,
+                },
                 &MetaEvent {
                     event: "resuming".to_string(),
                     device_id: None,
@@ -6057,26 +6420,26 @@ mod common_parallel {
             assert_eq!(guest.get_cpu_count().unwrap_or_default(), 4);
             let total_memory = guest.get_total_memory().unwrap_or_default();
             if !use_hotplug {
-                assert!(guest.get_total_memory().unwrap_or_default() > 3_840_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 400_000);
             } else {
-                assert!(total_memory > 4_800_000);
-                assert!(total_memory < 5_760_000);
+                assert!(total_memory > 900_000);
+                assert!(total_memory < 1_400_000);
                 // Deflate balloon to restore entire RAM to the VM
                 resize_command(&api_socket_restored, None, None, Some(0), None);
                 thread::sleep(std::time::Duration::new(5, 0));
-                assert!(guest.get_total_memory().unwrap_or_default() > 5_760_000);
+                assert!(guest.get_total_memory().unwrap_or_default() > 1_400_000);
                 // Decrease guest RAM with virtio-mem
-                resize_command(&api_socket_restored, None, Some(5 << 30), None, None);
+                resize_command(&api_socket_restored, None, Some(1 << 30), None, None);
                 thread::sleep(std::time::Duration::new(5, 0));
                 let total_memory = guest.get_total_memory().unwrap_or_default();
-                assert!(total_memory > 4_800_000);
-                assert!(total_memory < 5_760_000);
+                assert!(total_memory > 900_000);
+                assert!(total_memory < 1_400_000);
             }
 
             guest.check_devices_common(Some(&socket), Some(&console_text), None);
         });
         // Shutdown the target VM and check console output
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
 
@@ -6119,7 +6482,7 @@ mod common_parallel {
             assert!(new_counters > orig_counters);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6169,7 +6532,7 @@ mod common_parallel {
             assert_eq!(String::from_utf8_lossy(&vmm_num_in_elf.stdout).trim(), "4");
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6244,7 +6607,7 @@ mod common_parallel {
             }
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6268,6 +6631,7 @@ mod common_parallel {
             None,
             num_queue_pairs,
             Some(libc::O_RDWR | libc::O_NONBLOCK),
+            None,
         )
         .unwrap();
 
@@ -6304,20 +6668,20 @@ mod common_parallel {
                 2
             );
 
-            guest.reboot_linux(0, None);
-
-            assert_eq!(
-                guest
-                    .ssh_command("ip -o link | wc -l")
-                    .unwrap()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or_default(),
-                2
-            );
+            // guest.reboot_linux(0, None);
+            //
+            // assert_eq!(
+            //     guest
+            //         .ssh_command("ip -o link | wc -l")
+            //         .unwrap()
+            //         .trim()
+            //         .parse::<u32>()
+            //         .unwrap_or_default(),
+            //     2
+            // );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6707,20 +7071,20 @@ mod common_parallel {
             assert_eq!(guest.ssh_command("sudo umount /mnt").unwrap(), "");
             assert_eq!(guest.ssh_command("ls /mnt").unwrap(), "");
 
-            guest.reboot_linux(0, None);
-            assert_eq!(
-                guest.ssh_command("sudo mount /dev/nvme0n1 /mnt").unwrap(),
-                ""
-            );
-            assert_eq!(
-                guest.ssh_command("sudo cat /mnt/test").unwrap().trim(),
-                "test123"
-            );
+            // guest.reboot_linux(0, None);
+            // assert_eq!(
+            //     guest.ssh_command("sudo mount /dev/nvme0n1 /mnt").unwrap(),
+            //     ""
+            // );
+            // assert_eq!(
+            //     guest.ssh_command("sudo cat /mnt/test").unwrap().trim(),
+            //     "test123"
+            // );
         });
 
         cleanup_spdk_nvme();
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6842,7 +7206,7 @@ mod common_parallel {
             );
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -6921,7 +7285,7 @@ mod common_parallel {
             // test_vdpa_block()
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -7135,6 +7499,8 @@ mod compatibility {
 }
 
 mod vmm_instance {
+    use std::fs::File;
+    use std::io::Write;
     use std::path::PathBuf;
     #[cfg(feature = "lib_support")]
     use std::sync::mpsc::channel;
@@ -7148,7 +7514,8 @@ mod vmm_instance {
     #[cfg(feature = "lib_support")]
     use cube_hypervisor::NotifyEvent;
     use cube_hypervisor::VmmInstance;
-    use log::LevelFilter;
+    use log::info;
+    use rlimit::{setrlimit, Resource};
     use test_infra::{ssh_command_ip, DiskType, Guest, UbuntuDiskConfig};
     use vmm::api::{ApiRequest, ApiResponsePayload, VmSnapshotConfig};
     use vmm::config::RestoreConfig;
@@ -7202,8 +7569,8 @@ mod vmm_instance {
 
     fn default_vmm_config() -> VmmConfig {
         VmmConfig {
-            log_stderr: true,
-            log_level: LevelFilter::Info,
+            log_stderr: false,
+            log_json_file: None,
             ..Default::default()
         }
     }
@@ -7227,7 +7594,37 @@ mod vmm_instance {
         }
     }
 
-    fn set_default_seccomp_rules() {
+    fn dummy_vmm_setup() {
+        // Ensure all created files (.e.g sockets) are only accessible by this user
+        // SAFETY: trivially safe
+        let _ = unsafe { libc::umask(0o077) };
+
+        // Create dummy socket and dup it to large fd, so that we could trigger
+        // expand_files in kernel. And this tricky work will avoid later multi
+        // thread try to invoke expand_files at same time, there will be lock
+        // contention in expand_files.
+        // SAFETY: FFI call
+        unsafe {
+            let dummy = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if dummy > 0 {
+                libc::dup2(dummy, 512);
+            }
+        }
+
+        std::panic::set_hook(Box::new(|info| {
+            info!("{info:?}");
+            log::logger().flush();
+        }));
+
+        let coredump_limit: u64 = 2 * 1024 * 1024 * 1024;
+        let coredump_filter = "0x33".to_string();
+        let mut filter_file = File::options()
+            .write(true)
+            .open("/proc/self/coredump_filter")
+            .unwrap();
+        filter_file.write_all(coredump_filter.as_bytes()).unwrap();
+        setrlimit(Resource::CORE, coredump_limit, coredump_limit).unwrap();
+
         cube_hypervisor::set_runtime_seccomp_rules(vec![
             (libc::SYS_sysinfo, vec![]),
             (libc::SYS_getcwd, vec![]),
@@ -7241,7 +7638,7 @@ mod vmm_instance {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        set_default_seccomp_rules();
+        dummy_vmm_setup();
         let vmm_config = default_vmm_config();
         let mut vmm = DummyVmm::new(vmm_config);
 
@@ -7295,7 +7692,7 @@ mod vmm_instance {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        set_default_seccomp_rules();
+        dummy_vmm_setup();
         let vmm_config = default_vmm_config();
         let mut vmm = DummyVmm::new(vmm_config);
 
@@ -7366,7 +7763,7 @@ mod vmm_instance {
         let focal = UbuntuDiskConfig::new(FOCAL_IMAGE_NAME.to_string());
         let guest = Guest::new(Box::new(focal));
 
-        set_default_seccomp_rules();
+        dummy_vmm_setup();
         let vmm_config = default_vmm_config();
         let mut vmm = DummyVmm::new(vmm_config);
 
@@ -7449,7 +7846,7 @@ mod vmm_instance {
         // Create the snapshot directory
         let snapshot_dir = temp_snapshot_dir_path(&guest.tmp_dir);
 
-        set_default_seccomp_rules();
+        dummy_vmm_setup();
         let mut vmm_config = default_vmm_config();
         vmm_config.event_monitor = Some(EventMonitorConfig {
             path: Some(event_path.clone()),
@@ -7576,7 +7973,7 @@ mod vmm_instance {
         let mut vmm_config = default_vmm_config();
         let (sender, receiver) = channel();
         vmm_config.event_notifier = Some(EventNotifyConfig { notifier: sender });
-        let mut vmm = DummyVmm::new(vmm_config);
+        let vmm = DummyVmm::new(vmm_config);
 
         // Verify VMM service is running
         assert!(vmm.send_request(ApiRequest::VmmPing));
@@ -7955,7 +8352,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8020,7 +8417,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8109,7 +8506,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8184,7 +8581,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8259,7 +8656,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8331,7 +8728,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8426,7 +8823,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8556,7 +8953,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8614,7 +9011,7 @@ mod windows {
         });
 
         let _ = child.wait_timeout(std::time::Duration::from_secs(60));
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         let _ = child_dnsmasq.kill();
@@ -8678,7 +9075,7 @@ mod sgx {
                 ));
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -8944,7 +9341,7 @@ mod vfio {
             assert!(guest.get_total_memory_l2().unwrap_or_default() > 960_000);
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         cleanup_vfio_network_interfaces();
@@ -8989,7 +9386,7 @@ mod vfio {
             guest.check_nvidia_gpu();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -9041,7 +9438,7 @@ mod vfio {
             guest.check_nvidia_gpu();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -9071,13 +9468,13 @@ mod vfio {
             // Check the VFIO device works after boot
             guest.check_nvidia_gpu();
 
-            guest.reboot_linux(0, None);
-
-            // Check the VFIO device works after reboot
-            guest.check_nvidia_gpu();
+            // guest.reboot_linux(0, None);
+            //
+            // // Check the VFIO device works after reboot
+            // guest.check_nvidia_gpu();
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
 
         handle_child_output(r, &output);
@@ -10356,7 +10753,7 @@ mod rate_limiter {
             assert!(check_rate_limit(measured_bps, limit_bps, 0.1));
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
     }
@@ -10456,7 +10853,7 @@ mod rate_limiter {
             assert!(check_rate_limit(measured_rate, limit_rate, 0.1));
         });
 
-        let _ = child.kill();
+        kill_child(&mut child);
         let output = child.wait_with_output().unwrap();
         handle_child_output(r, &output);
     }

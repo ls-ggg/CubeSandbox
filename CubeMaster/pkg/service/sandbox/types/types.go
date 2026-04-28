@@ -363,6 +363,8 @@ type SandboxBriefData struct {
 	HostID      string            `json:"host_id,omitempty"`
 	HostIP      string            `json:"host_ip,omitempty"`
 	TemplateID  string            `json:"template_id,omitempty"`
+	CpuCount    int32             `json:"cpu_count,omitempty"`
+	MemoryMB    int32             `json:"memory_mb,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	NameSpace   string            `json:"namespace,omitempty"`
@@ -428,6 +430,7 @@ type ContainerOverrides struct {
 	Args            []string                  `json:"args,omitempty"`
 	WorkingDir      string                    `json:"working_dir,omitempty"`
 	Envs            []*KeyValue               `json:"envs,omitempty"`
+	DnsConfig       *DNSConfig                `json:"dns_config,omitempty"`
 	Resources       *Resource                 `json:"resources,omitempty"`
 	SecurityContext *ContainerSecurityContext `json:"security_context,omitempty"`
 	Probe           *Probe                    `json:"probe,omitempty"`

@@ -22,6 +22,7 @@ permissions:
   contents: read
 
 env:
+  GH_REPO: ${{ github.repository }}
   CNB_DOMAIN: cnb.cool
   CNB_API_ENDPOINT: https://api.cnb.cool
   CNB_WEB_ENDPOINT: https://cnb.cool
@@ -50,6 +51,7 @@ jobs:
             -e PLUGIN_USERNAME="cnb" \
             -e PLUGIN_PASSWORD="${{ secrets.CNB_GIT_PASSWORD }}" \
             -e PLUGIN_FORCE="true" \
+            -e PLUGIN_PUSH_TAGS="true" \
             tencentcom/git-sync
 
   resolve_release_context:

@@ -7,6 +7,8 @@ package sandbox
 import (
 	"context"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func ListSandbox(ctx context.Context, req *types.ListCubeSandboxReq) (rsp *types.ListCubeSandboxRes) {
@@ -179,6 +182,8 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 					Status:      int32(container.GetState()),
 					HostIP:      tmpNode.HostIP(),
 					TemplateID:  templateID,
+					CpuCount:    parseCPUCount(container.GetResources().GetCpu()),
+					MemoryMB:    parseMemoryMB(container.GetResources().GetMem()),
 					Annotations: buildTemplateAnnotations(templateID),
 					Labels:      labels,
 					NameSpace:   sandbox.GetNamespace(),
@@ -192,16 +197,53 @@ func doOneList(ctx context.Context, req *types.ListCubeSandboxReq, tmpNode *node
 	}
 }
 
-func matchFilter(lables map[string]string) bool {
+func matchFilter(labels map[string]string) bool {
 	tmpFilter := config.GetConfig().Common.ListFilterOutLables
-	if len(tmpFilter) == 0 || len(lables) == 0 {
+	if len(tmpFilter) == 0 || len(labels) == 0 {
 		return false
 	}
 
 	for k, v := range tmpFilter {
-		if m, ok := lables[k]; ok && m == v {
+		if m, ok := labels[k]; ok && m == v {
 			return true
 		}
 	}
 	return false
+}
+
+func parseInt32(raw string) int32 {
+	value, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return int32(value)
+}
+
+func parseCPUCount(raw string) int32 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+	if strings.HasSuffix(value, "m") {
+		return parseInt32(strings.TrimSuffix(value, "m")) / 1000
+	}
+	return parseInt32(value)
+}
+
+func parseMemoryMB(raw string) int32 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0
+	}
+	const maxInt32 = int64(1<<31 - 1)
+	memoryMB := quantity.ScaledValue(resource.Mega)
+	if memoryMB > maxInt32 {
+		return int32(maxInt32)
+	}
+	return int32(memoryMB)
 }

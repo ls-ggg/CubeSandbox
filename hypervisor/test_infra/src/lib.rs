@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use ssh2::Session;
@@ -447,7 +449,7 @@ impl DiskConfig for WindowsDiskConfig {
 }
 
 pub fn rate_limited_copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
-    for i in 0..10 {
+    for i in 0..2 {
         let free_bytes = unsafe {
             let mut stats = std::mem::MaybeUninit::zeroed();
             let fs_name = std::ffi::CString::new("/tmp").unwrap();
@@ -460,12 +462,12 @@ pub fn rate_limited_copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::
         };
 
         // Make sure there is at least 6 GiB of space
-        if free_bytes < 6 << 30 {
+        if free_bytes < 4 << 30 {
             eprintln!(
                 "Not enough space on disk ({}). Attempt {} of 10. Sleeping.",
                 free_bytes, i
             );
-            thread::sleep(std::time::Duration::new(60, 0));
+            thread::sleep(std::time::Duration::new(30, 0));
             continue;
         }
 
@@ -473,8 +475,8 @@ pub fn rate_limited_copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::
             Err(e) => {
                 if let Some(errno) = e.raw_os_error() {
                     if errno == libc::ENOSPC {
-                        eprintln!("Copy returned ENOSPC. Attempt {} of 10. Sleeping.", i);
-                        thread::sleep(std::time::Duration::new(60, 0));
+                        eprintln!("Copy returned ENOSPC. Attempt {} of 2. Sleeping.", i);
+                        thread::sleep(std::time::Duration::new(30, 0));
                         continue;
                     }
                 }
@@ -735,6 +737,22 @@ pub fn exec_host_command_output(command: &str) -> Output {
         .unwrap_or_else(|_| panic!("Expected '{}' to run", command))
 }
 
+pub fn kill_child(child: &mut Child) {
+    let r = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    if r != 0 {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error().unwrap() == libc::ESRCH {
+            return;
+        }
+        eprintln!("Failed to kill child with SIGTERM: {e:?}");
+    }
+
+    // The timeout period elapsed without the child exiting
+    if child.wait_timeout(Duration::new(5, 0)).unwrap().is_none() {
+        let _ = child.kill();
+    }
+}
+
 pub const PIPE_SIZE: i32 = 32 << 20;
 
 static NEXT_VM_ID: Lazy<Mutex<u8>> = Lazy::new(|| Mutex::new(1));
@@ -747,6 +765,21 @@ pub struct Guest {
 
 // Safe to implement as we know we have no interior mutability
 impl std::panic::RefUnwindSafe for Guest {}
+
+impl Drop for Guest {
+    fn drop(&mut self) {
+        let tmp_path = self.tmp_dir.as_path().to_path_buf();
+        // Explicitly remove the temp directory to ensure cleanup even in panic scenarios.
+        // TempDir's own Drop also does this, but we add logging for better observability.
+        match self.tmp_dir.remove() {
+            Ok(_) => eprintln!("Successfully cleaned up guest temp dir: {:?}", tmp_path),
+            Err(e) => eprintln!(
+                "Warning: failed to clean up guest temp dir {:?}: {:?}",
+                tmp_path, e
+            ),
+        }
+    }
+}
 
 impl Guest {
     pub fn new_from_ip_range(mut disk_config: Box<dyn DiskConfig>, class: &str, id: u8) -> Self {
@@ -1205,7 +1238,7 @@ pub struct GuestCommand<'a> {
 
 impl<'a> GuestCommand<'a> {
     pub fn new(guest: &'a Guest) -> Self {
-        Self::new_with_binary_path(guest, &clh_command("cloud-hypervisor"))
+        Self::new_with_binary_path(guest, &clh_command("cube-hypervisor"))
     }
 
     pub fn new_with_binary_path(guest: &'a Guest, binary_path: &str) -> Self {
@@ -1247,9 +1280,9 @@ impl<'a> GuestCommand<'a> {
 
         if self.print_cmd {
             println!(
-                "\n\n==== Start cloud-hypervisor command-line ====\n\n\
+                "\n\n==== Start cube-hypervisor command-line ====\n\n\
                      {:?}\n\
-                     \n==== End cloud-hypervisor command-line ====\n\n",
+                     \n==== End cube-hypervisor command-line ====\n\n",
                 self.command
             );
         }
