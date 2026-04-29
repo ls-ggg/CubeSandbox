@@ -99,6 +99,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
       - name: Compute vmlinux cache metadata
         id: vmlinux_metadata
         run: |
