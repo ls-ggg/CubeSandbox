@@ -16,33 +16,67 @@ use std::path::PathBuf;
 /// Supported values: `"RollbackSnapshot"`
 const ANNO_UPDATE_EXT_ACTION: &str = "cube.shimapi.update.action";
 
-/// (RollbackSnapshot) **Required.** URL of the snapshot to restore from.
-/// Format follows `RestoreConfig::source_url`, e.g. `file:///data/snapshots/foo`.
-const ANNO_ROLLBACK_SNAPSHOT_URL: &str = "cube.shimapi.update.rollback.snapshot_url";
-
-/// (RollbackSnapshot) **Optional.** JSON-encoded `RollbackRestoreExt` carrying
-/// additional backend-file descriptors (disks, fs, net, pmem, …) that should
-/// replace the running VM's devices after the rollback.
+/// (RollbackSnapshot) **Required.** JSON-encoded `RollbackRestoreConfig`,
+/// aligned with hypervisor `RestoreConfig`.
 ///
-/// Only the fields present in the JSON are applied; absent fields keep their
-/// defaults (i.e. hypervisor re-uses the device config baked into the snapshot).
-const ANNO_ROLLBACK_RESTORE_EXT: &str = "cube.shimapi.update.rollback.restore_config";
+/// Required fields:
+///   `source_url`  — URL of the snapshot to restore from (e.g. `file:///data/snapshots/foo`)
+///
+/// Optional fields (replace backend devices after restore):
+///   `disks`, `net`, `fs`, `vsock`, `pmem`, `prefault`, `dirty_log`
+const ANNO_ROLLBACK_RESTORE_CONFIG: &str = "cube.shimapi.update.rollback.restore_config";
 
-// ── supplemental restore fields ───────────────────────────────────────────────
+// ── restore config aligned with hypervisor RestoreConfig ─────────────────────
 
-/// Subset of `RestoreConfig` that callers may supply via annotation.
-/// Using a dedicated struct keeps the wire format stable even if upstream
-/// `RestoreConfig` gains new fields.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct RollbackRestoreExt {
+/// Wire format for RollbackSnapshot, directly mirrors `RestoreConfig` in
+/// hypervisor/vmm/src/config.rs so callers work with a single familiar struct.
+#[derive(Debug, Serialize, Deserialize)]
+struct RollbackRestoreConfig {
+    /// URL of the snapshot to restore from (e.g. `file:///data/snapshots/foo`).
+    pub source_url: String,
+
+    /// Replace block devices after restore.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disks: Option<Vec<cube_hypervisor::vm_config::DiskConfig>>,
+
+    /// Replace network interfaces after restore.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub net: Option<Vec<cube_hypervisor::vm_config::NetConfig>>,
+
+    /// Replace virtio-fs mounts after restore.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fs: Option<Vec<cube_hypervisor::vm_config::FsConfig>>,
+
+    /// Replace vsock device after restore.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vsock: Option<cube_hypervisor::vm_config::VsockConfig>,
+
+    /// Replace pmem devices after restore.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pmem: Option<Vec<cube_hypervisor::vm_config::PmemConfig>>,
+
+    /// Prefault memory pages on restore (default: false).
+    #[serde(default)]
+    pub prefault: bool,
+
+    /// Enable dirty log after restore (default: false).
+    #[serde(default)]
+    pub dirty_log: bool,
+}
+
+impl From<RollbackRestoreConfig> for RestoreConfig {
+    fn from(r: RollbackRestoreConfig) -> Self {
+        RestoreConfig {
+            source_url: PathBuf::from(r.source_url),
+            disks: r.disks,
+            net: r.net,
+            fs: r.fs,
+            vsock: r.vsock,
+            pmem: r.pmem,
+            prefault: r.prefault,
+            dirty_log: r.dirty_log,
+        }
+    }
 }
 
 // ── action implementations ────────────────────────────────────────────────────
@@ -50,42 +84,29 @@ struct RollbackRestoreExt {
 /// Roll back the running VM to a previously-taken snapshot.
 ///
 /// Steps:
-/// 1. Pause the current VM and snapshot its state to a temporary path on disk
-///    (so the hypervisor process can be cleanly detached).
-/// 2. Resume the VM from the `snapshot_url` supplied by the caller, optionally
-///    replacing block/network/fs devices via `restore_config`.
+/// 1. Pause the current VM and snapshot its state to a temporary path on disk.
+/// 2. Resume the VM from the snapshot specified in `restore_config.source_url`,
+///    optionally replacing backend devices via the other fields.
 async fn do_rollback_snapshot(
     sb: &mut SandBox,
     annos: &HashMap<String, String>,
     log: &Log,
 ) -> CResult<()> {
-    // --- parse snapshot_url (required) ---
-    let snapshot_url = annos
-        .get(ANNO_ROLLBACK_SNAPSHOT_URL)
-        .ok_or_else(|| format!("missing annotation: {}", ANNO_ROLLBACK_SNAPSHOT_URL))?;
+    // --- parse restore_config (required) ---
+    let raw = annos
+        .get(ANNO_ROLLBACK_RESTORE_CONFIG)
+        .ok_or_else(|| format!("missing annotation: {}", ANNO_ROLLBACK_RESTORE_CONFIG))?;
+
+    let rollback_cfg: RollbackRestoreConfig = serde_json::from_str(raw)
+        .map_err(|e| format!("invalid {}: {}", ANNO_ROLLBACK_RESTORE_CONFIG, e))?;
 
     infof!(
         log,
-        "rollback snapshot: target snapshot_url={}",
-        snapshot_url
+        "rollback snapshot: target source_url={}",
+        rollback_cfg.source_url
     );
 
-    // --- parse optional extra restore fields ---
-    let ext: RollbackRestoreExt = match annos.get(ANNO_ROLLBACK_RESTORE_EXT) {
-        Some(raw) => serde_json::from_str(raw)
-            .map_err(|e| format!("invalid {}: {}", ANNO_ROLLBACK_RESTORE_EXT, e))?,
-        None => RollbackRestoreExt::default(),
-    };
-
-    // --- build RestoreConfig ---
-    let restore_config = RestoreConfig {
-        source_url: PathBuf::from(snapshot_url),
-        disks: ext.disks,
-        net: ext.net,
-        fs: ext.fs,
-        pmem: ext.pmem,
-        ..Default::default()
-    };
+    let restore_config: RestoreConfig = rollback_cfg.into();
 
     // --- delegate to sb ---
     sb.rollback_vm(restore_config).await.map_err(|e| {
