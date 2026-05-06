@@ -80,6 +80,17 @@ pub struct SnapshotArgs {
         required_if_eq("app_snapshot", "true")
     )]
     pub vm_id: Option<String>,
+
+    /// Optional URL for storing memory range data on a separate volume.
+    /// When set, memory snapshot data is written to this path instead of
+    /// the default <path>/snapshot/memory-ranges.
+    #[arg(
+        long = "memory-vol",
+        value_name = "memory vol url",
+        help = "optional URL for storing memory data on a separate volume (e.g. file:///dev/vdb)",
+        required = false
+    )]
+    pub memory_vol: Option<String>,
 }
 
 pub async fn execute(args: SnapshotArgs) -> Result<()> {
@@ -109,6 +120,7 @@ impl TryFrom<SnapshotArgs> for Snapshot {
         snapshot.tap = !args.notap;
         snapshot.force = args.force;
         snapshot.app_snapshot = args.app_snapshot;
+        snapshot.memory_vol_url = args.memory_vol;
         if args.app_snapshot {
             if args.vm_id.is_none() {
                 return Err("not specify the vmid in app snapshot mode".to_string());

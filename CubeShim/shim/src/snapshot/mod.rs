@@ -88,6 +88,7 @@ pub struct Snapshot {
     sharefs_ptr: Option<FilePtr>,
     vsock_ptr: Option<FilePtr>,
     app_snapshot: bool,
+    memory_vol_url: Option<String>,
 }
 
 impl Snapshot {
@@ -148,6 +149,7 @@ impl Snapshot {
 
         let config = SnapshotConfig {
             destination_url: format!("file://{}", snapshot_path.to_str().unwrap()),
+            memory_vol_url: self.memory_vol_url.clone(),
             ..Default::default()
         };
         let data =
@@ -349,6 +351,7 @@ impl Snapshot {
 
         let config = SnapshotConfig {
             destination_url: format!("file://{}", snapshot_path.to_str().unwrap()),
+            memory_vol_url: self.memory_vol_url.clone(),
             ..Default::default()
         };
         let _ = self
