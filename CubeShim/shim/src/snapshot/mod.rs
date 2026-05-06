@@ -20,7 +20,7 @@ use cube_hypervisor::config::BackendFsConfig;
 
 use cube_hypervisor::vmm_config;
 use cube_hypervisor::ApiRequest;
-use cube_hypervisor::VmSnapshotConfig;
+use cube_hypervisor::SnapshotConfig;
 use cube_hypervisor::{NotifyEvent, VmmInstance};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -146,8 +146,9 @@ impl Snapshot {
             )
         })?;
 
-        let config = VmSnapshotConfig {
+        let config = SnapshotConfig {
             destination_url: format!("file://{}", snapshot_path.to_str().unwrap()),
+            ..Default::default()
         };
         let data =
             serde_json::to_string(&config).map_err(|e| format!("serialize config failed:{}", e))?;
@@ -346,8 +347,9 @@ impl Snapshot {
             )
         })?;
 
-        let config = VmSnapshotConfig {
+        let config = SnapshotConfig {
             destination_url: format!("file://{}", snapshot_path.to_str().unwrap()),
+            ..Default::default()
         };
         let _ = self
             .ch

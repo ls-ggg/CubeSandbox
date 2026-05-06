@@ -24,7 +24,7 @@ use containerd_shim::protos::protobuf::MessageDyn;
 use containerd_shim::{Error, Result};
 use cube_hypervisor::config::RestoreConfig;
 use cube_hypervisor::vm_config::{DeviceConfig, FsConfig};
-use cube_hypervisor::VmRemoveDeviceData;
+use cube_hypervisor::{SnapshotType, VmRemoveDeviceData};
 use oci_spec::runtime::{LinuxResources, Process, Spec};
 use protoc::{agent, agent_ttrpc, health, health_ttrpc};
 use std::collections::{HashMap, HashSet};
@@ -1133,11 +1133,18 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn create_snapshot(&self, snapshot_path: &str) -> CResult<()> {
+    pub async fn create_snapshot(
+        &self,
+        snapshot_path: &str,
+        snapshot_type: SnapshotType,
+    ) -> CResult<()> {
         let ch = self.ch.as_ref().unwrap().lock().await;
         ch.pause_vm().await?;
-        ch.snapshot_vm(format!("file://{}", snapshot_path).as_str())
-            .await?;
+        ch.snapshot_vm(
+            format!("file://{}", snapshot_path).as_str(),
+            snapshot_type,
+        )
+        .await?;
         ch.resume_vm().await
     }
     pub async fn paused(&self) -> bool {

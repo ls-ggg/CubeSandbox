@@ -10,7 +10,8 @@ use crate::log::{stat_defer, Log};
 use cube_hypervisor::config::RestoreConfig;
 use cube_hypervisor::vm_config::{DeviceConfig, FsConfig};
 use cube_hypervisor::{
-    self, config, vmm_config, ApiRequest, ApiResponsePayload, VmRemoveDeviceData, VmSnapshotConfig,
+    self, config, vmm_config, ApiRequest, ApiResponsePayload, SnapshotConfig, SnapshotType,
+    VmRemoveDeviceData,
 };
 use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
@@ -131,10 +132,12 @@ impl CubeHypervisor {
         Ok(())
     }
 
-    pub async fn snapshot_vm(&self, path: &str) -> CResult<()> {
+    pub async fn snapshot_vm(&self, path: &str, snapshot_type: SnapshotType) -> CResult<()> {
         let ch = self.ch.as_ref().unwrap().lock().await;
-        let snap_config = Arc::new(VmSnapshotConfig {
+        let snap_config = Arc::new(SnapshotConfig {
             destination_url: path.to_string(),
+            snapshot_type,
+            ..Default::default()
         });
         let _ = ch
             .send_request(ApiRequest::VmSnapshot(snap_config))
@@ -268,8 +271,9 @@ impl CubeHypervisor {
     }
 
     pub async fn pause_vm_cube(&self, path: &str) -> CResult<()> {
-        let snap_config = Arc::new(VmSnapshotConfig {
+        let snap_config = Arc::new(SnapshotConfig {
             destination_url: path.to_string(),
+            ..Default::default()
         });
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
