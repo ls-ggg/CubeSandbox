@@ -20,6 +20,7 @@ use vmm::vm_config::{
     DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig, VdpaConfig,
     VsockConfig,
 };
+use vmm::{SnapshotConfig, SnapshotType};
 
 #[derive(Debug)]
 enum Error {
@@ -247,9 +248,16 @@ fn add_vsock_api_command(socket: &mut UnixStream, config: &str) -> Result<(), Er
     .map_err(Error::ApiClient)
 }
 
-fn snapshot_api_command(socket: &mut UnixStream, url: &str) -> Result<(), Error> {
-    let snapshot_config = vmm::api::VmSnapshotConfig {
+fn snapshot_api_command(
+    socket: &mut UnixStream,
+    url: &str,
+    snapshot_type: SnapshotType,
+    memory_vol_url: Option<String>,
+) -> Result<(), Error> {
+    let snapshot_config = SnapshotConfig {
         destination_url: String::from(url),
+        snapshot_type,
+        memory_vol_url,
     };
 
     simple_api_command(
@@ -273,9 +281,16 @@ fn restore_api_command(socket: &mut UnixStream, config: &str) -> Result<(), Erro
     .map_err(Error::ApiClient)
 }
 
-fn pause2snapshot_api_command(socket: &mut UnixStream, url: &str) -> Result<(), Error> {
-    let snapshot_config = vmm::api::VmSnapshotConfig {
+fn pause2snapshot_api_command(
+    socket: &mut UnixStream,
+    url: &str,
+    snapshot_type: SnapshotType,
+    memory_vol_url: Option<String>,
+) -> Result<(), Error> {
+    let snapshot_config = SnapshotConfig {
         destination_url: String::from(url),
+        snapshot_type,
+        memory_vol_url,
     };
 
     simple_api_command(
@@ -471,14 +486,22 @@ fn do_command(matches: &ArgMatches) -> Result<(), Error> {
                 .get_one::<String>("vsock_config")
                 .unwrap(),
         ),
-        Some("snapshot") => snapshot_api_command(
-            &mut socket,
-            matches
-                .subcommand_matches("snapshot")
-                .unwrap()
-                .get_one::<String>("snapshot_config")
-                .unwrap(),
-        ),
+        Some("snapshot") => {
+            let sub_matches = matches.subcommand_matches("snapshot").unwrap();
+            let snapshot_type = sub_matches
+                .get_one::<String>("snapshot_type")
+                .map(|s| s.parse::<SnapshotType>().unwrap_or_default())
+                .unwrap_or_default();
+            let memory_vol_url = sub_matches
+                .get_one::<String>("memory_vol_url")
+                .cloned();
+            snapshot_api_command(
+                &mut socket,
+                sub_matches.get_one::<String>("snapshot_config").unwrap(),
+                snapshot_type,
+                memory_vol_url,
+            )
+        }
         Some("restore") => restore_api_command(
             &mut socket,
             matches
@@ -487,14 +510,22 @@ fn do_command(matches: &ArgMatches) -> Result<(), Error> {
                 .get_one::<String>("restore_config")
                 .unwrap(),
         ),
-        Some("pause2snapshot") => pause2snapshot_api_command(
-            &mut socket,
-            matches
-                .subcommand_matches("pause2snapshot")
-                .unwrap()
-                .get_one::<String>("snapshot_config")
-                .unwrap(),
-        ),
+        Some("pause2snapshot") => {
+            let sub_matches = matches.subcommand_matches("pause2snapshot").unwrap();
+            let snapshot_type = sub_matches
+                .get_one::<String>("snapshot_type")
+                .map(|s| s.parse::<SnapshotType>().unwrap_or_default())
+                .unwrap_or_default();
+            let memory_vol_url = sub_matches
+                .get_one::<String>("memory_vol_url")
+                .cloned();
+            pause2snapshot_api_command(
+                &mut socket,
+                sub_matches.get_one::<String>("snapshot_config").unwrap(),
+                snapshot_type,
+                memory_vol_url,
+            )
+        }
         Some("resume-from-snapshot") => resume_from_snap_api_command(
             &mut socket,
             matches
@@ -655,12 +686,25 @@ fn main() {
         .subcommand(Command::new("delete").about("Delete a VM"))
         .subcommand(Command::new("shutdown").about("Shutdown the VM"))
         .subcommand(
-            Command::new("snapshot")
+        Command::new("snapshot")
                 .about("Create a snapshot from VM")
                 .arg(
                     Arg::new("snapshot_config")
                         .index(1)
                         .help("<destination_url>"),
+                )
+                .arg(
+                    Arg::new("snapshot_type")
+                        .long("snapshot-type")
+                        .help("Snapshot type: 'full' or 'incremental' (saves only CoW anonymous pages)")
+                        .num_args(1)
+                        .default_value("incremental"),
+                )
+                .arg(
+                    Arg::new("memory_vol_url")
+                        .long("memory-vol-url")
+                        .help("Optional block device path for storing memory range data on a separate volume")
+                        .num_args(1),
                 ),
         )
         .subcommand(
@@ -673,12 +717,25 @@ fn main() {
                 ),
         )
         .subcommand(
-            Command::new("pause2snapshot")
+        Command::new("pause2snapshot")
                 .about("Pause and create a snapshot from VM")
                 .arg(
                     Arg::new("snapshot_config")
                         .index(1)
                         .help("<destination_url>"),
+                )
+                .arg(
+                    Arg::new("snapshot_type")
+                        .long("snapshot-type")
+                        .help("Snapshot type: 'full' or 'incremental' (saves only CoW anonymous pages)")
+                        .num_args(1)
+                        .default_value("incremental"),
+                )
+                .arg(
+                    Arg::new("memory_vol_url")
+                        .long("memory-vol-url")
+                        .help("Optional block device path for storing memory range data on a separate volume")
+                        .num_args(1),
                 ),
         )
         .subcommand(

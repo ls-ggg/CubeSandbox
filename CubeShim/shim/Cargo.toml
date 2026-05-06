@@ -29,7 +29,7 @@ serde_json = "=1.0.128"
 time = "=0.3.36"
 anyhow = { workspace = true }
 async-trait = {optional = true, version="=0.1.88"}
-cube-hypervisor = {git = "https://github.com/lisongqian/CubeSandbox", branch = "incremental", features = ["lib_support"]}
+cube-hypervisor = {path = "../../hypervisor", features = ["lib_support"]}
 lazy_static = "=1.5.0"
 libc = "=0.2.158"
 protobuf="=3.4.0"

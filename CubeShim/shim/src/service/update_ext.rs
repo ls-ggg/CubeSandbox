@@ -62,6 +62,12 @@ struct RollbackRestoreConfig {
     /// Enable dirty log after restore (default: false).
     #[serde(default)]
     pub dirty_log: bool,
+
+    /// Optional URL for reading memory range data from a separate volume.
+    /// Mirrors RestoreConfig.memory_vol_url: when set, memory data is read
+    /// from this path instead of source_url/<memory-ranges>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_vol_url: Option<String>,
 }
 
 impl From<RollbackRestoreConfig> for RestoreConfig {
@@ -75,6 +81,7 @@ impl From<RollbackRestoreConfig> for RestoreConfig {
             pmem: r.pmem,
             prefault: r.prefault,
             dirty_log: r.dirty_log,
+            memory_vol_url: r.memory_vol_url,
         }
     }
 }
