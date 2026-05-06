@@ -1185,6 +1185,51 @@ impl SandBox {
     }
 
     pub async fn resume_vm(&mut self) -> CResult<()> {
+        self.resume_vm_with_config(None).await
+    }
+
+    /// Rollback: pause current VM (snapshot to disk), then resume from a caller-supplied
+    /// snapshot.  The temporary pause snapshot is discarded after a successful resume.
+    ///
+    /// * `target_config` – `RestoreConfig` pointing to the desired snapshot.  The
+    ///   `source_url` field is mandatory; `disks`, `fs`, `net`, etc. carry the
+    ///   new backend-file descriptors that should replace the paused VM's devices.
+    pub async fn rollback_vm(&mut self, target_config: RestoreConfig) -> CResult<()> {
+        // 1. Pause current VM (reuse existing pause logic)
+        {
+            let mut state = self.state.lock().await;
+            if *state != SandBoxState::Normal {
+                return Err(format!("sandbox not running, cannot rollback").into());
+            }
+            if self.pause_vm_forbidding().await {
+                return Err(
+                    format!("sandbox pause forbidding, terminate exec tasks first").into(),
+                );
+            }
+            *state = SandBoxState::Paused;
+        }
+
+        self.disconnect_agent().await?;
+
+        {
+            let ch = self.ch.as_mut().unwrap().lock().await;
+            let tmp_snapshot_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
+            let _ = std::fs::remove_dir_all(tmp_snapshot_path.clone());
+            if let Err(e) = std::fs::create_dir_all(tmp_snapshot_path.clone()) {
+                return Err(format!("mkdir snapshot dir failed:{}", e).into());
+            }
+            ch.pause_vm_cube(format!("file://{}", tmp_snapshot_path).as_str())
+                .await?;
+            let _ = ch
+                .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
+                .await?;
+        }
+
+        // 2. Resume from the caller-supplied snapshot
+        self.resume_vm_with_config(Some(target_config)).await
+    }
+
+    async fn resume_vm_with_config(&mut self, config: Option<RestoreConfig>) -> CResult<()> {
         //modify state
         {
             let mut state = self.state.lock().await;
@@ -1196,9 +1241,16 @@ impl SandBox {
         //resume vm
         {
             let ch = self.ch.as_mut().unwrap().lock().await;
-            let resume_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
-            ch.resume_vm_cube(format!("file://{}", resume_path).as_str())
-                .await?;
+            match config {
+                Some(restore_config) => {
+                    ch.resume_vm_cube_with_config(restore_config).await?;
+                }
+                None => {
+                    let resume_path = format!("{}/{}", PAUSE_VM_SNAPSHOT_BASE, self.id);
+                    ch.resume_vm_cube(format!("file://{}", resume_path).as_str())
+                        .await?;
+                }
+            }
         }
 
         self.connect_agent().await?;

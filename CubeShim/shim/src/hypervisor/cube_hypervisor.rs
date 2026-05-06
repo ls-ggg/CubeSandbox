@@ -293,4 +293,15 @@ impl CubeHypervisor {
 
         Ok(())
     }
+
+    pub async fn resume_vm_cube_with_config(&self, config: RestoreConfig) -> CResult<()> {
+        let restore_config = Arc::new(config);
+        let ch = self.ch.as_ref().unwrap().lock().await;
+        let _ = ch
+            .send_request(ApiRequest::VmResumeFromSnapshot(restore_config))
+            .map_err(|e| self.status_err(format!("resume vm from snapshot failed:{}", e)))?
+            .map_err(|e| self.status_err(format!("resume vm from snapshot failed:{}", e)))?;
+
+        Ok(())
+    }
 }
