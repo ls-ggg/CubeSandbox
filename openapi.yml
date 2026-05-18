@@ -239,6 +239,84 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /sandboxes/{sandboxID}/snapshots:
+    post:
+      tags:
+      - handlers::sandboxes
+      operationId: create_snapshot
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSnapshotRequest'
+        required: true
+      responses:
+        '201':
+          description: Snapshot created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotInfo'
+        '404':
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Snapshot operation already in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    get:
+      tags:
+      - handlers::sandboxes
+      operationId: list_snapshots
+      summary: List snapshots created from a sandbox
+      description: |
+        Returns all snapshots that were created from the given sandbox via
+        `POST /sandboxes/{sandboxID}/snapshots` during the lifetime of this
+        CubeAPI process.  Each snapshot entry includes the snapshotID (usable
+        as a templateID to clone new sandboxes), its human-readable names, and
+        the creation timestamp.
+
+        Note: only snapshots created through this CubeAPI instance are
+        reflected here.  For a durable cross-replica view, query
+        `GET /templates` instead.
+      parameters:
+      - name: sandboxID
+        in: path
+        description: Sandbox identifier
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: List of snapshots created from this sandbox
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxSnapshotList'
+        '500':
+          description: Unexpected backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /templates:
     get:
       tags:
@@ -819,6 +897,60 @@ components:
           type:
           - string
           - 'null'
+    SandboxSnapshotEntry:
+      type: object
+      description: A single snapshot entry returned by GET /sandboxes/{sandboxID}/snapshots.
+      required:
+      - snapshotID
+      - names
+      - created_at
+      properties:
+        snapshotID:
+          type: string
+          description: Snapshot ID — usable as templateID to clone a new sandbox.
+        names:
+          type: array
+          items:
+            type: string
+          description: Human-readable names assigned at creation time.
+        created_at:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp when this snapshot was created.
+    SandboxSnapshotList:
+      type: object
+      description: Response body for GET /sandboxes/{sandboxID}/snapshots.
+      required:
+      - snapshots
+      properties:
+        snapshots:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxSnapshotEntry'
+    SnapshotInfo:
+      type: object
+      description: Response for POST /sandboxes/{id}/snapshots.
+      required:
+      - snapshotID
+      - names
+      properties:
+        snapshotID:
+          type: string
+          description: Snapshot ID.
+        names:
+          type: array
+          items:
+            type: string
+          description: Human-readable names for this snapshot.
+    CreateSnapshotRequest:
+      type: object
+      description: Request body for POST /sandboxes/{id}/snapshots.
+      properties:
+        name:
+          type:
+          - string
+          - 'null'
+          description: Optional human-readable name for the snapshot.
   securitySchemes:
     apiKeyAuth:
       type: apiKey

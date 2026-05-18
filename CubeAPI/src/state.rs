@@ -4,7 +4,9 @@
 
 use crate::cubemaster::CubeMasterClient;
 use crate::logging::ArcLogger;
+use crate::models::SandboxSnapshotEntry;
 use crate::services::AppServices;
+use dashmap::DashMap;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -28,6 +30,14 @@ pub struct AppState {
 
     /// Server config snapshot.
     pub config: Arc<crate::config::ServerConfig>,
+
+    /// In-process index of sandbox → snapshots created during this process's
+    /// lifetime.  Key: sandbox_id, Value: list of snapshot entries (appended
+    /// on every successful POST /sandboxes/:id/snapshots).
+    ///
+    /// DashMap is lock-free for concurrent reads and is cheap to clone (the
+    /// clone is an Arc clone, not a deep copy).
+    pub snapshot_index: Arc<DashMap<String, Vec<SandboxSnapshotEntry>>>,
 }
 
 impl AppState {
@@ -54,6 +64,7 @@ impl AppState {
             services,
             logger,
             config: Arc::new(config),
+            snapshot_index: Arc::new(DashMap::new()),
         }
     }
 }

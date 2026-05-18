@@ -243,6 +243,24 @@ pub struct SnapshotInfo {
     pub names: Vec<String>,
 }
 
+/// A snapshot entry returned by GET /sandboxes/{id}/snapshots.
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct SandboxSnapshotEntry {
+    /// Snapshot ID (usable as templateID to clone a new sandbox).
+    #[serde(rename = "snapshotID")]
+    pub snapshot_id: String,
+    /// Human-readable names assigned at creation time.
+    pub names: Vec<String>,
+    /// RFC 3339 timestamp when this snapshot was created.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response body for GET /sandboxes/{id}/snapshots.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SandboxSnapshotList {
+    pub snapshots: Vec<SandboxSnapshotEntry>,
+}
+
 // ─── Sandbox — logs ────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]

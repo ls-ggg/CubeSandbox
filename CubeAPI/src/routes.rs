@@ -99,7 +99,7 @@ fn build_sandbox_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         )
         .route(
             "/sandboxes/:sandboxID/snapshots",
-            post(sandboxes::create_snapshot),
+            post(sandboxes::create_snapshot).get(sandboxes::list_snapshots),
         );
 
     with_auth_and_rate_limit(routes, state, auth_configured)
@@ -231,5 +231,31 @@ mod tests {
             .get("/nodes")
             .await
             .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_snapshots_route_exists_and_returns_empty_list() {
+        let server = test_server();
+        // No snapshots have been created, so the index is empty.
+        // The handler should still respond 200 with an empty list.
+        let resp = server
+            .get("/sandboxes/sb-test-123/snapshots")
+            .await;
+        assert_ne!(
+            resp.status_code(),
+            StatusCode::NOT_FOUND,
+            "GET /sandboxes/:id/snapshots should be registered"
+        );
+        assert_eq!(
+            resp.status_code(),
+            StatusCode::OK,
+            "empty snapshot index should return 200"
+        );
+        let body: serde_json::Value = resp.json();
+        assert_eq!(
+            body["snapshots"],
+            serde_json::json!([]),
+            "snapshots array should be empty"
+        );
     }
 }

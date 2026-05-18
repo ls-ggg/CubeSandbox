@@ -15,7 +15,8 @@ use crate::{
     models::{
         ApiError, ConnectSandbox, CreateSnapshotRequest, ListSandboxesQuery, ListSandboxesV2Query,
         NewSandbox, RefreshRequest, ResumedSandbox, Sandbox, SandboxDetail, SandboxLogsQuery,
-        SandboxLogsV2Query, SandboxLogsV2Response, SetTimeoutRequest,
+        SandboxLogsV2Query, SandboxLogsV2Response, SandboxSnapshotEntry, SandboxSnapshotList,
+        SetTimeoutRequest,
     },
     state::AppState,
 };
@@ -365,7 +366,73 @@ pub async fn create_snapshot(
                 .field("snapshot_id", &snapshot_id),
         )
         .await;
+
+    // Record this snapshot in the in-process index so that
+    // GET /sandboxes/:id/snapshots can serve it without an extra CubeMaster
+    // round-trip.  The entry is keyed by sandbox_id and appended atomically.
+    let entry = SandboxSnapshotEntry {
+        snapshot_id: snapshot_id.clone(),
+        names: snapshot.names.clone(),
+        created_at: chrono::Utc::now(),
+    };
+    state
+        .snapshot_index
+        .entry(sandbox_id.clone())
+        .or_default()
+        .push(entry);
+
     Ok((StatusCode::CREATED, Json(snapshot)))
+}
+
+// ─── GET /sandboxes/:sandboxID/snapshots ──────────────────────────────────────
+
+/// List snapshots that were created from a specific sandbox during the lifetime
+/// of this CubeAPI process.
+///
+/// The response reflects only snapshots created via this instance; snapshots
+/// created by other CubeAPI replicas are not included because CubeMaster does
+/// not expose a sandbox→snapshot query API.  Clients that need a durable,
+/// cross-replica view should query `GET /templates` and filter by the
+/// `snapshotID` field themselves.
+#[utoipa::path(
+    get,
+    path = "/sandboxes/{sandboxID}/snapshots",
+    params(
+        ("sandboxID" = String, Path, description = "Sandbox identifier")
+    ),
+    responses(
+        (status = 200, description = "List of snapshots created from this sandbox",
+         body = SandboxSnapshotList),
+        (status = 404, description = "No snapshots found for this sandbox", body = ApiError),
+        (status = 500, description = "Unexpected backend error", body = ApiError)
+    )
+)]
+pub async fn list_snapshots(
+    State(state): State<AppState>,
+    Path(sandbox_id): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    state
+        .logger
+        .log(
+            LogEvent::new(LogLevel::Debug, "api.request")
+                .field("handler", "list_snapshots")
+                .field("sandbox_id", &sandbox_id),
+        )
+        .await;
+
+    let snapshots = state
+        .snapshot_index
+        .get(&sandbox_id)
+        .map(|v| v.clone())
+        .unwrap_or_default();
+
+    tracing::debug!(
+        sandbox_id = %sandbox_id,
+        count = snapshots.len(),
+        "list_snapshots: returning"
+    );
+
+    Ok((StatusCode::OK, Json(SandboxSnapshotList { snapshots })))
 }
 
 // ─── GET /sandboxes/:sandboxID/logs ───────────────────────────────────────────
