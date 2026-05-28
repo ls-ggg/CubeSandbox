@@ -280,6 +280,20 @@ async fn real_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+fn set_fd_limit(limit: u64) {
+    let rlim = libc::rlimit {
+        rlim_cur: limit,
+        rlim_max: limit,
+    };
+    let ret = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) };
+    if ret != 0 {
+        eprintln!(
+            "warning: failed to set RLIMIT_NOFILE to {}: errno {}",
+            limit, ret
+        );
+    }
+}
+
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let args = AgentOpts::parse();
 
@@ -302,6 +316,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         cube::rootfs::do_exec_mount();
         exit(0);
     }
+
+    set_fd_limit(100_000);
 
     println!(
         "agent start at:{}",
