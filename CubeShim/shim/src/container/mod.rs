@@ -626,6 +626,16 @@ impl Container {
                     //stop the container to unblock the hanging 'wait' call
                     if self.sb_conf.app_snapshot_create {
                         state.set_container_stoped().await;
+                        // Cancel log forwarding so the vsock read loop exits
+                        // before containerd sends Delete; without this the
+                        // pending read_stdout call keeps the vsock fd open and
+                        // prevents containerd from proceeding past Wait.
+                        if let Some(tx) = self.log_forward_cancel.take() {
+                            let _ = tx.send(true);
+                        }
+                        if let Some(handle) = self.log_forward_handle.take() {
+                            handle.abort();
+                        }
                     }
                     if exec_id.is_empty() {
                         self.stop_log_forward().await;
