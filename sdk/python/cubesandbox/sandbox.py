@@ -134,18 +134,15 @@ class Sandbox:
             _validate_allow_out_domains_require_deny_all(
                 network.get("allow_out"),
                 network.get("deny_out"),
-                default_deny_all=(
-                    not allow_internet_access
-                    or network.get("allow_public_traffic") is False
-                ),
+                default_deny_all=not allow_internet_access,
             )
             net: dict = {}
-            if "allow_public_traffic" in network:
-                net["allowPublicTraffic"] = network["allow_public_traffic"]
             if "allow_out" in network:
                 net["allowOut"] = network["allow_out"]
             if "deny_out" in network:
                 net["denyOut"] = network["deny_out"]
+            if "allow_public_traffic" in network:
+                net["allowPublicTraffic"] = network["allow_public_traffic"]
             if "rules" in network and network["rules"]:
                 net["rules"] = [_serialize_rule(r) for r in network["rules"]]
             if net:
