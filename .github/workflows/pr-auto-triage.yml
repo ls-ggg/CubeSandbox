@@ -1,0 +1,121 @@
+name: PR Module Triage
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: pr-module-triage-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout base revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/CODEOWNERS
+            .github/scripts/pr_module_triage.py
+
+      - name: Compute affected modules and owners
+        id: triage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/pr_module_triage.py \
+            --codeowners .github/CODEOWNERS \
+            --pr-number "${{ github.event.pull_request.number }}" \
+            --owner "${{ github.repository_owner }}" \
+            --repo "${{ github.event.repository.name }}" \
+            --author "${{ github.event.pull_request.user.login }}" \
+            --comment-file triage-comment.md \
+            --emit-github-output > triage.json
+          echo "modules=$(jq -r '.modules | keys | join(", ")' triage.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Post or update triage comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = "<!-- pr-module-triage -->";
+            const body = fs.readFileSync('triage-comment.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 }
+            );
+
+            const existing = comments.find(
+              (comment) =>
+                comment.user.type === "Bot" &&
+                comment.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body,
+            });
+
+      - name: Assign suggested code owners
+        if: steps.triage.outputs.owners != ''
+        uses: actions/github-script@v7
+        env:
+          OWNERS: ${{ steps.triage.outputs.owners }}
+        with:
+          script: |
+            const owners = process.env.OWNERS.split(",").filter(Boolean);
+            if (owners.length === 0) {
+              return;
+            }
+
+            await github.rest.issues.addAssignees({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              assignees: owners.slice(0, 10),
+            }).catch((error) => {
+              core.warning(`Failed to assign code owners: ${error.message}`);
+            });
+
+      - name: Request reviews from suggested code owners
+        if: steps.triage.outputs.owners != ''
+        uses: actions/github-script@v7
+        env:
+          OWNERS: ${{ steps.triage.outputs.owners }}
+        with:
+          script: |
+            const owners = process.env.OWNERS.split(",").filter(Boolean);
+            if (owners.length === 0) {
+              return;
+            }
+
+            await github.rest.pulls.requestReviewers({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              reviewers: owners.slice(0, 10),
+            }).catch((error) => {
+              core.warning(`Failed to request reviewers: ${error.message}`);
+            });
