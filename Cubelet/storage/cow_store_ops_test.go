@@ -21,6 +21,63 @@ func TestXfsCowName(t *testing.T) {
 	require.Equal(t, cow.NameS3, "s3")
 }
 
+func TestS3CowName(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, cow.NameS3, (&S3Cow{}).Name())
+}
+
+func TestStoreForSelectsXfsAndS3(t *testing.T) {
+	engine := &fakeCowEngine{}
+	useTestCowStorage(t, engine)
+
+	xfs, err := StoreFor(cow.BackendXFS)
+	require.NoError(t, err)
+	require.Equal(t, cow.NameXfsCow, xfs.Name())
+
+	s3Store, err := StoreFor(cow.BackendS3)
+	require.NoError(t, err)
+	require.Equal(t, cow.NameS3, s3Store.Name())
+
+	// Both coexist; selecting one does not replace the other.
+	require.Equal(t, cow.NameXfsCow, ActiveCowStore().Name())
+	require.Equal(t, cow.NameS3, ActiveS3CowStore().Name())
+}
+
+func TestCommitRootfsForUsesS3Store(t *testing.T) {
+	engine := &fakeCowEngine{
+		createSnapshotPath: "/dev/mapper/tpl-snap-s3-rootfs",
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-s3-rootfs": {DevicePath: "/dev/mapper/tpl-snap-s3-rootfs", SizeBytes: 1 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	source := &CowSnapshotObject{Name: "sb-1-rootfs-gen0", Kind: cow.KindSnapshot}
+	obj, err := CommitRootfsFor(context.Background(), cow.BackendS3, source, "snap-s3")
+	require.NoError(t, err)
+	require.Equal(t, "tpl-snap-s3-rootfs", obj.Name)
+	require.Equal(t, [][2]string{{"sb-1-rootfs-gen0", "tpl-snap-s3-rootfs"}}, engine.createSnapshots)
+}
+
+func TestSyncSnapshotMockReady(t *testing.T) {
+	useTestCowStorage(t, &fakeCowEngine{})
+
+	st, err := SnapshotSyncStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.SyncStatePending, st.State)
+
+	require.NoError(t, SyncSnapshot(context.Background(), cow.BackendS3, "snap-1"))
+	st, err = SnapshotSyncStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.SyncStateReady, st.State)
+	require.Equal(t, "snap-1", st.SnapshotID)
+
+	// XFS has no sync.
+	err = SyncSnapshot(context.Background(), cow.BackendXFS, "snap-1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "only supported")
+}
+
 func TestRequireCowStoreNotInitialized(t *testing.T) {
 	prev := localStorage
 	localStorage = nil

@@ -15,8 +15,15 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
-// requireCowStore returns the process-wide [cow.Store] (xfscow today).
+// requireCowStore returns the default (XFS) [cow.Store].
 func requireCowStore() (cow.Store, error) {
+	return requireCowStoreFor(cow.BackendXFS)
+}
+
+// requireCowStoreFor returns the [cow.Store] for the given backend type
+// (request `type`: xfs｜s3). Empty / unknown aliases are normalized via
+// [cow.NormalizeBackend].
+func requireCowStoreFor(backend string) (cow.Store, error) {
 	if localStorage == nil {
 		return nil, fmt.Errorf("storage is not initialized")
 	}
@@ -26,11 +33,79 @@ func requireCowStore() (cow.Store, error) {
 	if err := localStorage.ensureCowManager(); err != nil {
 		return nil, err
 	}
-	store := ActiveCowStore()
+	store, err := StoreFor(backend)
+	if err != nil {
+		return nil, err
+	}
 	if store == nil {
 		return nil, fmt.Errorf("cow store is not initialized")
 	}
 	return store, nil
+}
+
+// SyncSnapshot triggers a mock/real remote sync for snapshotID on the S3 Store.
+// backend must normalize to s3; XFS returns an error (no remote sync).
+func SyncSnapshot(ctx context.Context, backend, snapshotID string) error {
+	syncer, err := requireCowSyncer(backend)
+	if err != nil {
+		return err
+	}
+	return syncer.Sync(ctx, snapshotID)
+}
+
+// SnapshotSyncStatus returns the sync state for snapshotID on the S3 Store.
+func SnapshotSyncStatus(ctx context.Context, backend, snapshotID string) (*cow.SyncStatus, error) {
+	syncer, err := requireCowSyncer(backend)
+	if err != nil {
+		return nil, err
+	}
+	return syncer.SyncStatus(ctx, snapshotID)
+}
+
+func requireCowSyncer(backend string) (cow.Syncer, error) {
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return nil, err
+	}
+	if normalized != cow.BackendS3 {
+		return nil, fmt.Errorf("sync is only supported on %q backend (got %q)", cow.BackendS3, normalized)
+	}
+	store, err := requireCowStoreFor(cow.BackendS3)
+	if err != nil {
+		return nil, err
+	}
+	syncer, ok := store.(cow.Syncer)
+	if !ok || syncer == nil {
+		return nil, fmt.Errorf("s3 cow store does not implement sync")
+	}
+	return syncer, nil
+}
+
+// StoreFor returns the live XFS or S3 [cow.Store] for backend (request `type`).
+// Both Stores are initialized together when cubecow storage is enabled.
+func StoreFor(backend string) (cow.Store, error) {
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return nil, err
+	}
+	if localStorage == nil {
+		return nil, fmt.Errorf("storage is not initialized")
+	}
+	if err := localStorage.ensureCowManager(); err != nil {
+		return nil, err
+	}
+	switch normalized {
+	case cow.BackendS3:
+		if localStorage.s3CowManager == nil {
+			return nil, fmt.Errorf("s3 cow store is not initialized")
+		}
+		return localStorage.s3CowManager, nil
+	default:
+		if localStorage.cowManager == nil {
+			return nil, fmt.Errorf("xfs cow store is not initialized")
+		}
+		return localStorage.cowManager, nil
+	}
 }
 
 // GetSandboxRootfs resolves the live sandbox rootfs CoW object.
@@ -52,9 +127,14 @@ func GetSandboxRootfs(ctx context.Context, sandboxID, preferredVolumeName string
 	return backendFileInfoToSnapshotObject(ctx, localStorage.cowManager, rootfs)
 }
 
-// CommitRootfs commits source rootfs into tpl-<id>-rootfs via [cow.Store].
+// CommitRootfs commits source rootfs into tpl-<id>-rootfs on the default (XFS) Store.
 func CommitRootfs(ctx context.Context, source *CowSnapshotObject, id string) (*CowSnapshotObject, error) {
-	store, err := requireCowStore()
+	return CommitRootfsFor(ctx, cow.BackendXFS, source, id)
+}
+
+// CommitRootfsFor is [CommitRootfs] on the Store selected by backend (request `type`).
+func CommitRootfsFor(ctx context.Context, backend string, source *CowSnapshotObject, id string) (*CowSnapshotObject, error) {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +150,12 @@ func CommitRootfs(ctx context.Context, source *CowSnapshotObject, id string) (*C
 
 // CommitRootfsFromBuild commits tpl-<id>-build-rootfs into tpl-<id>-rootfs.
 func CommitRootfsFromBuild(ctx context.Context, id string) (*CowSnapshotObject, error) {
-	store, err := requireCowStore()
+	return CommitRootfsFromBuildFor(ctx, cow.BackendXFS, id)
+}
+
+// CommitRootfsFromBuildFor is [CommitRootfsFromBuild] on the Store for backend.
+func CommitRootfsFromBuildFor(ctx context.Context, backend, id string) (*CowSnapshotObject, error) {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return nil, err
 	}
@@ -81,9 +166,14 @@ func CommitRootfsFromBuild(ctx context.Context, id string) (*CowSnapshotObject, 
 	return cubecowVolumeToSnapshotObjectWithoutActivation(ctx, store, volume)
 }
 
-// CreateMemoryVolume creates empty tpl-<id>-memory via [cow.Store].
+// CreateMemoryVolume creates empty tpl-<id>-memory via the default (XFS) Store.
 func CreateMemoryVolume(ctx context.Context, id string, sizeBytes uint64) (*CowSnapshotObject, error) {
-	store, err := requireCowStore()
+	return CreateMemoryVolumeFor(ctx, cow.BackendXFS, id, sizeBytes)
+}
+
+// CreateMemoryVolumeFor is [CreateMemoryVolume] on the Store for backend.
+func CreateMemoryVolumeFor(ctx context.Context, backend, id string, sizeBytes uint64) (*CowSnapshotObject, error) {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return nil, err
 	}
@@ -94,9 +184,14 @@ func CreateMemoryVolume(ctx context.Context, id string, sizeBytes uint64) (*CowS
 	return cubecowVolumeToSnapshotObject(ctx, store, volume)
 }
 
-// CommitMemoryFromBase clones source memory into tpl-<id>-memory via [cow.Store].
+// CommitMemoryFromBase clones source memory into tpl-<id>-memory via the default Store.
 func CommitMemoryFromBase(ctx context.Context, source *CowSnapshotObject, id string, sizeBytes uint64) (*CowSnapshotObject, error) {
-	store, err := requireCowStore()
+	return CommitMemoryFromBaseFor(ctx, cow.BackendXFS, source, id, sizeBytes)
+}
+
+// CommitMemoryFromBaseFor is [CommitMemoryFromBase] on the Store for backend.
+func CommitMemoryFromBaseFor(ctx context.Context, backend string, source *CowSnapshotObject, id string, sizeBytes uint64) (*CowSnapshotObject, error) {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return nil, err
 	}
@@ -110,27 +205,42 @@ func CommitMemoryFromBase(ctx context.Context, source *CowSnapshotObject, id str
 	return cubecowVolumeToSnapshotObject(ctx, store, volume)
 }
 
-// DeleteObject deletes a CoW volume/snapshot by name and kind.
+// DeleteObject deletes a CoW volume/snapshot by name and kind on the default Store.
 func DeleteObject(ctx context.Context, name, kind string) error {
-	store, err := requireCowStore()
+	return DeleteObjectFor(ctx, cow.BackendXFS, name, kind)
+}
+
+// DeleteObjectFor is [DeleteObject] on the Store for backend.
+func DeleteObjectFor(ctx context.Context, backend, name, kind string) error {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return err
 	}
 	return store.DeleteByKind(ctx, name, kind)
 }
 
-// DeactivateObject deactivates a CoW volume/snapshot.
+// DeactivateObject deactivates a CoW volume/snapshot on the default Store.
 func DeactivateObject(ctx context.Context, name, kind string) error {
-	store, err := requireCowStore()
+	return DeactivateObjectFor(ctx, cow.BackendXFS, name, kind)
+}
+
+// DeactivateObjectFor is [DeactivateObject] on the Store for backend.
+func DeactivateObjectFor(ctx context.Context, backend, name, kind string) error {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return err
 	}
 	return store.DeactivateByKind(ctx, name, kind)
 }
 
-// ResolveObjectPath resolves a CoW object to a device/file path.
+// ResolveObjectPath resolves a CoW object to a device/file path on the default Store.
 func ResolveObjectPath(ctx context.Context, name, kind string) (string, error) {
-	store, err := requireCowStore()
+	return ResolveObjectPathFor(ctx, cow.BackendXFS, name, kind)
+}
+
+// ResolveObjectPathFor is [ResolveObjectPath] on the Store for backend.
+func ResolveObjectPathFor(ctx context.Context, backend, name, kind string) (string, error) {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return "", err
 	}

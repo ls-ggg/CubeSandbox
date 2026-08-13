@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Package s3 is reserved for a future S3-backed CoW Store implementation.
+// Package s3 holds the canonical backend name for the S3 CoW Store.
 //
-// It will satisfy [cow.Store] with the same object naming and kind semantics as
-// xfscow, while Resolve/Delete talk to remote snapshot objects. Not implemented
-// yet — see package xfscow for the current backend.
+// The runtime mock type lives in package storage as [storage.S3Cow]: a copy of
+// the XFS/reflink Store path that shares the cubecow engine until a real remote
+// S3 backend exists. Do not put mock logic into [storage.XfsCow].
 package s3
 
 import "github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 
-// Name is the Store.Name() value reserved for the S3-backed backend.
+// Name is the Store.Name() value for the S3-backed backend.
 const Name = cow.NameS3

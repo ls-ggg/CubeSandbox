@@ -5,11 +5,13 @@
 // Package cow declares the Cubelet CoW object-store abstraction.
 //
 // [Store] is the base interface; concrete backends are subclasses:
-//   - [NameXfsCow] ("xfscow"): local XFS/reflink via cubecow (current)
-//   - [NameS3] ("s3"): reserved for a future remote-backed implementation
+//   - [NameXfsCow] ("xfscow"): local XFS/reflink via cubecow
+//   - [NameS3] ("s3"): S3 scheme Store (mock today: same cubecow/XFS semantics;
+//     real remote sync/status comes later)
 //
-// Callers use storage package helpers (CommitRootfs, CreateMemoryVolume,
-// DeleteObject, …) which dispatch to the active Store (storage.XfsCow today).
+// XFS and S3 Stores coexist in one Cubelet process. Callers pick a backend via
+// request `type` / [NormalizeBackend] (see storage.StoreFor). Legacy helpers
+// that omit a backend keep defaulting to XFS.
 package cow
 
 import (

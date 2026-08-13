@@ -61,13 +61,22 @@ func IsCowBackend() bool {
 	return localStorage != nil && localStorage.useCowStorage()
 }
 
-// ActiveCowStore returns the process-wide CoW Store (xfscow today), or nil
-// when storage is not initialized / not using a CoW backend.
+// ActiveCowStore returns the default (XFS) CoW Store, or nil when storage is
+// not initialized / not using a CoW backend. Prefer [StoreFor] when the request
+// carries an explicit backend type (xfs｜s3).
 func ActiveCowStore() cow.Store {
 	if localStorage == nil {
 		return nil
 	}
 	return localStorage.cowManager
+}
+
+// ActiveS3CowStore returns the S3 CoW Store (mock), or nil when unset.
+func ActiveS3CowStore() cow.Store {
+	if localStorage == nil {
+		return nil
+	}
+	return localStorage.s3CowManager
 }
 
 // Compatibility aliases — prefer GetSandboxRootfs / CommitRootfs / CreateMemoryVolume /

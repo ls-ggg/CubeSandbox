@@ -67,7 +67,8 @@ type local struct {
 	cubeboxAPI           cubes.CubeboxAPI
 	multiLock            *multilock.MultiLock
 	cowEngine            *cubecow.Engine
-	cowManager           cowVolumeManager
+	cowManager           cowVolumeManager // XFS / xfscow Store (default)
+	s3CowManager         cowVolumeManager // S3 Store (mock; coexists with XFS)
 
 	// rcDB is the dedicated bbolt DB for the plugin-volume reference-count store.
 	// It is a sibling file to meta.db in the same db directory.
@@ -141,16 +142,19 @@ func (l *local) useCowStorage() bool {
 }
 
 func (l *local) ensureCowManager() error {
-	if l.cowManager != nil {
-		return nil
-	}
 	if l.cowEngine == nil {
 		if l.useCowStorage() {
 			return fmt.Errorf("cubecow engine not initialized")
 		}
 		return nil
 	}
-	l.cowManager = newCowVolumeManager(l.cowEngine)
+	// Both backends are live at once; request `type` selects which Store to use.
+	if l.cowManager == nil {
+		l.cowManager = newCowVolumeManager(l.cowEngine)
+	}
+	if l.s3CowManager == nil {
+		l.s3CowManager = newS3CowVolumeManager(l.cowEngine)
+	}
 	return nil
 }
 
@@ -388,6 +392,7 @@ func (l *local) Close() error {
 		l.cowEngine = nil
 	}
 	l.cowManager = nil
+	l.s3CowManager = nil
 	return nil
 }
 
