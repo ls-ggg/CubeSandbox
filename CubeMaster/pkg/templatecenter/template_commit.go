@@ -281,6 +281,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		_, cleanupErr := cubelet.CleanupTemplate(cleanupCtx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
 			RequestID:  uuid.NewString(),
 			TemplateID: templateID,
+			Backend:    pinnedCleanupBackend(storageBackendFromCreate(createReq)),
 		})
 		cleanupCancel()
 		if cleanupErr != nil {

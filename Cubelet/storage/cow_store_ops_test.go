@@ -72,10 +72,11 @@ func TestSyncSnapshotMockReady(t *testing.T) {
 	require.Equal(t, cow.SyncStateReady, st.State)
 	require.Equal(t, "snap-1", st.SnapshotID)
 
-	// XFS has no sync.
-	err = SyncSnapshot(context.Background(), cow.BackendXFS, "snap-1")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "only supported")
+	// XFS has no remote store; sync is a successful no-op so callers do not fail.
+	require.NoError(t, SyncSnapshot(context.Background(), cow.BackendXFS, "snap-1"))
+	st, err = SnapshotSyncStatus(context.Background(), cow.BackendXFS, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.SyncStateReady, st.State)
 }
 
 func TestActivateSnapshotActivatesLocalObjects(t *testing.T) {

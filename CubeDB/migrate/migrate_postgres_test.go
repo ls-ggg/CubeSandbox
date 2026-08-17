@@ -136,8 +136,8 @@ func assertPGHeadSchema(t *testing.T, db *sql.DB) {
 		},
 		{
 			table:   "t_cube_sandbox_spec",
-			columns: []string{"sandbox_id", "request_json", "backfilled"},
-			indexes: []string{"idx_sandbox_spec_deleted_at"},
+			columns: []string{"sandbox_id", "request_json", "backfilled", "backend"},
+			indexes: []string{"idx_sandbox_spec_deleted_at", "idx_sandbox_spec_backend"},
 		},
 		{
 			table:   "t_cube_instance_info",

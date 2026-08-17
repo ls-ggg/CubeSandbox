@@ -36,6 +36,32 @@ func NormalizeSnapshotBackend(raw string) (string, error) {
 	}
 }
 
+// ResolveSnapshotBackend returns the first non-empty candidate after
+// NormalizeSnapshotBackend. All-empty input is xfs (Cubelet default).
+func ResolveSnapshotBackend(values ...string) (string, error) {
+	if normalized, ok, err := OptionalSnapshotBackend(values...); err != nil || ok {
+		return normalized, err
+	}
+	return SnapshotBackendXFS, nil
+}
+
+// OptionalSnapshotBackend returns the first non-empty candidate after
+// NormalizeSnapshotBackend. All-empty input is ("", false, nil) so callers
+// can leave existing requests untouched.
+func OptionalSnapshotBackend(values ...string) (string, bool, error) {
+	for _, raw := range values {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		normalized, err := NormalizeSnapshotBackend(raw)
+		if err != nil {
+			return "", false, err
+		}
+		return normalized, true, nil
+	}
+	return "", false, nil
+}
+
 // SnapshotRemoteStatus returns the default remote_status for a normalized
 // backend. S3 starts pending; xfs leaves the column empty.
 func SnapshotRemoteStatus(backend string) string {

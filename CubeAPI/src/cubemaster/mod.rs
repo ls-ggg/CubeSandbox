@@ -784,6 +784,10 @@ pub struct CreateSandboxRequest {
     /// CubeMaster's `auto_resume` JSON tag.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub auto_resume: bool,
+
+    /// CoW backend (xfs | s3). Omitted keeps the historical Cubelet default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 /// Network egress control sent to CubeMaster.

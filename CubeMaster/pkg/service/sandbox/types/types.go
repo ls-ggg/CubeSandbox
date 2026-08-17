@@ -688,6 +688,10 @@ type CreateTemplateFromImageReq struct {
 	// with ivshmem enabled so the captured snapshot already contains the
 	// device topology.
 	EnableIvshmem *bool `json:"enable_ivshmem,omitempty"`
+
+	// Backend is the CoW store (xfs｜s3) for this template and every
+	// sandbox / pause-snap / commit snapshot created from it. Empty means xfs.
+	Backend string `json:"backend,omitempty"`
 }
 
 type RedoTemplateFromImageReq struct {

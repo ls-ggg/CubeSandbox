@@ -63,6 +63,11 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 	// Resume success + failed pausesnap.Delete must not brick the next Pause.
 	clearStalePauseBindingIfRunning(ctx, req.RequestID, req.SandboxID, hostIP)
 
+	if strings.TrimSpace(req.Backend) == "" {
+		if spec, specErr := sandboxspec.Get(ctx, req.SandboxID); specErr == nil && spec != nil {
+			req.Backend = spec.Backend
+		}
+	}
 	snapID, err := pausesnap.Begin(ctx, req.SandboxID, nodeID, hostIP, req.InstanceType, req.Backend)
 	if err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
@@ -364,6 +369,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		},
 	}
 	if b := strings.TrimSpace(rec.Backend); b != "" {
+		cubeletReq.Backend = b
 		cubeletReq.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
 	fillResumeRecreateFields(ctx, req.SandboxID, cubeletReq, createReq)
@@ -415,9 +421,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	// (cache hits renew TTL and would otherwise keep routing to the old NIC).
 	cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
 
-	// Pause snap objects are the live disk／memory after Resume — do not
-	// CleanupTemplate them. Drop only the Master pause-snap binding so the
-	// next Pause can allocate a new snap id.
+	// Pause snap stays on disk for Resume. Cubelet drops the previous live
+	// pause snap after the next Pause succeeds. Master only deletes the
+	// pause-snap binding so the next Pause can allocate a new id.
 	if err := pausesnap.Delete(ctx, snapID); err != nil {
 		log.G(ctx).Warnf("resume: delete pause snap meta %s: %v", snapID, err)
 	}

@@ -144,6 +144,11 @@ func (l *local) useCowStorage() bool {
 
 func (l *local) ensureCowManager() error {
 	if l.cowEngine == nil {
+		// Tests inject Stores without a live cubecow engine. Production
+		// plugin init always sets the engine before this runs.
+		if l.cowManager != nil || l.s3CowManager != nil {
+			return nil
+		}
 		if l.useCowStorage() {
 			return fmt.Errorf("cubecow engine not initialized")
 		}
@@ -210,13 +215,14 @@ func (l *local) refreshCowPaths(info *StorageInfo) error {
 	if info == nil || len(info.Volumes) == 0 {
 		return nil
 	}
-	if err := l.ensureCowManager(); err != nil {
+	store, err := l.storeForBackend(storageBackendFromInfo(info))
+	if err != nil {
 		if !l.useCowStorage() {
 			return nil
 		}
 		return err
 	}
-	return refreshStorageInfoPathsWithManager(context.Background(), info, l.cowManager)
+	return refreshStorageInfoPathsWithManager(context.Background(), info, store)
 }
 
 type StateRecoverer interface {
@@ -694,7 +700,7 @@ func (l *local) CreateCubeboxBaseStorage(ctx context.Context, opts *workflow.Cre
 	}
 
 	result := &StorageInfo{Namespace: ns, SandboxID: opts.GetSandboxID(), Volumes: make(map[string]*BackendFileInfo),
-		TemplateID: templateID, InstanceType: opts.GetInstanceType()}
+		TemplateID: templateID, InstanceType: opts.GetInstanceType(), Backend: optionalCreateContextBackend(opts)}
 	defer func() {
 		start := time.Now()
 		var errs error
@@ -794,7 +800,8 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
 	}
 
-	result := &StorageInfo{Namespace: ns, SandboxID: opts.SandboxID, Volumes: make(map[string]*BackendFileInfo)}
+	result := &StorageInfo{Namespace: ns, SandboxID: opts.SandboxID, Volumes: make(map[string]*BackendFileInfo),
+		Backend: optionalCreateContextBackend(opts)}
 	defer func() {
 		if retErr == nil {
 			return
@@ -924,7 +931,8 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	// longer trusted - they may be stale or empty after the master-thin
 	// refactor. fail-fast on catalog miss so create-from-snapshot does not
 	// silently degrade to a cold start.
-	volumeName, volumeKind, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, annotations)
+	backend := createContextStorageBackend(opts)
+	volumeName, volumeKind, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, backend, annotations)
 	if err != nil {
 		return "", err
 	}
@@ -935,13 +943,11 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	if err != nil {
 		return "", fmt.Errorf("invalid snapshot memory volume kind %q: %w", volumeKind, err)
 	}
-	if err := l.ensureCowManager(); err != nil {
+	store, err := l.storeForBackend(backend)
+	if err != nil {
 		return "", err
 	}
-	if l.cowManager == nil {
-		return "", fmt.Errorf("cubecow manager not initialized for snapshot memory volume %s", volumeName)
-	}
-	devPath, err := l.cowManager.ResolveDevPath(ctx, volumeName, normalizedKind)
+	devPath, err := store.ResolveDevPath(ctx, volumeName, normalizedKind)
 	if err != nil {
 		return "", fmt.Errorf("resolve snapshot memory volume %s: %w", volumeName, err)
 	}
@@ -962,7 +968,7 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 //     the snapshot/template legitimately has no memory image (e.g. rootfs-only
 //     template), so memory prefetch is correctly a no-op.
 //   - Logical id present, catalog hit with memory_vol -> normal restore.
-func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, annotations map[string]string) (string, string, error) {
+func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, backend string, annotations map[string]string) (string, string, error) {
 	logicalID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeSnapshotID])
 	if logicalID == "" {
 		logicalID = strings.TrimSpace(annotations[constants.MasterAnnotationAppSnapshotTemplateID])
@@ -970,7 +976,10 @@ func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, annotat
 	if logicalID == "" {
 		return "", "", nil
 	}
-	entry, err := GetLocalSnapshotFor(ctx, annotations[constants.MasterAnnotationStorageBackend], logicalID)
+	if strings.TrimSpace(backend) == "" {
+		backend = annotations[constants.MasterAnnotationStorageBackend]
+	}
+	entry, err := GetLocalSnapshotFor(ctx, backend, logicalID)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve snapshot %s from local catalog: %w", logicalID, err)
 	}
@@ -1013,7 +1022,7 @@ func (l *local) prepareDefaultMedium(ctx context.Context, opts *workflow.CreateC
 
 	templateID, hasSnapshotTemplate := opts.GetSnapshotTemplateID()
 	if hasSnapshotTemplate && opts.IsCreateSnapshot() && l.useCowStorage() {
-		if err := l.dealCowTemplateBuildRootfs(ctx, templateID, v.Name, sizeLimit, result); err != nil {
+		if err := l.dealCowTemplateBuildRootfs(ctx, opts, templateID, v.Name, sizeLimit, result); err != nil {
 			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 		}
 	} else if hasSnapshotTemplate && !opts.IsCubeboxV2() {
@@ -1024,7 +1033,7 @@ func (l *local) prepareDefaultMedium(ctx context.Context, opts *workflow.CreateC
 		if err := l.dealCowV2SandboxDefaultMedium(ctx, opts, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
 			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 		}
-	} else if err := l.dealDefaultMedium(ctx, opts.SandboxID, v.Name, sizeLimit, result); err != nil {
+	} else if err := l.dealDefaultMedium(ctx, opts, opts.SandboxID, v.Name, sizeLimit, result); err != nil {
 		return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 	}
 	return nil
@@ -1077,18 +1086,19 @@ func newDefaultMediumBackendInfo(name, filePath string, requested resource.Quant
 	return info
 }
 
-func (l *local) dealCowTemplateBuildRootfs(ctx context.Context, templateID, name, sizeStr string, result *StorageInfo) error {
+func (l *local) dealCowTemplateBuildRootfs(ctx context.Context, opts *workflow.CreateContext, templateID, name, sizeStr string, result *StorageInfo) error {
 	size, err := resource.ParseQuantity(sizeStr)
 	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
 	if err != nil {
 		log.G(ctx).Errorf("invalid EmptyDir SizeLimit: %s", sizeStr)
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
 	}
-	if err := l.ensureCowManager(); err != nil {
+	store, err := l.storeForBackend(createContextStorageBackend(opts))
+	if err != nil {
 		return err
 	}
 	sizes := normalizeRootfsSizes(size)
-	volume, err := l.cowManager.CreateTemplateBuildRootfs(ctx, templateID, uint64(sizes.backendAllocSize.Value()))
+	volume, err := store.CreateTemplateBuildRootfs(ctx, templateID, uint64(sizes.backendAllocSize.Value()))
 	if err != nil {
 		log.G(ctx).Errorf("allocate cubecow template build rootfs fail:%v", err)
 		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate cubecow template build rootfs fail:%v", err)
@@ -1104,9 +1114,6 @@ func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, opts *workflo
 		log.G(ctx).Errorf("invalid EmptyDir SizeLimit: %s", sizeStr)
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid EmptyDir SizeLimit:%v", size)
 	}
-	if err := l.ensureCowManager(); err != nil {
-		return err
-	}
 	sizes := normalizeRootfsSizes(size)
 	volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
 	if err != nil {
@@ -1118,29 +1125,103 @@ func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, opts *workflo
 }
 
 func createContextStorageBackend(opts *workflow.CreateContext) string {
-	if opts == nil || opts.ReqInfo == nil {
-		return cow.BackendXFS
+	if backend := optionalCreateContextBackend(opts); backend != "" {
+		return backend
 	}
-	if raw := strings.TrimSpace(opts.ReqInfo.GetBackend()); raw != "" {
-		if backend, err := cow.NormalizeBackend(raw); err == nil {
-			return backend
+	return cow.BackendXFS
+}
+
+// storeForBackend returns this node's XFS or S3 Store for the request /
+// persisted backend. Empty / unknown aliases normalize to XFS.
+func (l *local) storeForBackend(backend string) (cow.Store, error) {
+	if l == nil {
+		return nil, fmt.Errorf("storage is not initialized")
+	}
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return nil, err
+	}
+	switch normalized {
+	case cow.BackendS3:
+		if l.s3CowManager != nil {
+			return l.s3CowManager, nil
+		}
+	default:
+		if l.cowManager != nil {
+			return l.cowManager, nil
 		}
 	}
-	backend, err := cow.NormalizeBackend(opts.ReqInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+	if err := l.ensureCowManager(); err != nil {
+		return nil, err
+	}
+	switch normalized {
+	case cow.BackendS3:
+		if l.s3CowManager == nil {
+			return nil, fmt.Errorf("s3 cow store is not initialized")
+		}
+		return l.s3CowManager, nil
+	default:
+		if l.cowManager == nil {
+			return nil, fmt.Errorf("xfs cow store is not initialized")
+		}
+		return l.cowManager, nil
+	}
+}
+
+func storageBackendFromInfo(info *StorageInfo) string {
+	if info == nil || strings.TrimSpace(info.Backend) == "" {
+		return cow.BackendXFS
+	}
+	backend, err := cow.NormalizeBackend(info.Backend)
 	if err != nil {
 		return cow.BackendXFS
 	}
 	return backend
 }
 
+func destroyStorageBackend(info *StorageInfo, opts *workflow.DestroyContext) string {
+	if info != nil && strings.TrimSpace(info.Backend) != "" {
+		return storageBackendFromInfo(info)
+	}
+	if opts != nil && opts.DestroyInfo != nil {
+		raw := strings.TrimSpace(opts.DestroyInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+		if raw != "" {
+			if backend, err := cow.NormalizeBackend(raw); err == nil {
+				return backend
+			}
+		}
+	}
+	return cow.BackendXFS
+}
+
+func optionalCreateContextBackend(opts *workflow.CreateContext) string {
+	if opts == nil || opts.ReqInfo == nil {
+		return ""
+	}
+	if raw := strings.TrimSpace(opts.ReqInfo.GetBackend()); raw != "" {
+		if backend, err := cow.NormalizeBackend(raw); err == nil {
+			return backend
+		}
+	}
+	raw := strings.TrimSpace(opts.ReqInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+	if raw == "" {
+		return ""
+	}
+	backend, err := cow.NormalizeBackend(raw)
+	if err != nil {
+		return ""
+	}
+	return backend
+}
+
 func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID string, desiredSizeBytes uint64) (*cowVolume, error) {
 	backend := createContextStorageBackend(opts)
-	store, err := StoreFor(backend)
+	store, err := l.storeForBackend(backend)
 	if err != nil {
 		return nil, err
 	}
 	if opts != nil && opts.IsPauseResume() {
-		if err := ActivateSnapshot(ctx, backend, templateID); err != nil {
+		if err := activateStoreObjects(ctx, store, backend, templateID); err != nil {
 			return nil, err
 		}
 		return attachExistingSnapshotRootfs(ctx, store, backend, templateID)
@@ -1230,7 +1311,7 @@ func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.Crea
 	}
 }
 
-func (l *local) dealDefaultMedium(ctx context.Context, sandboxID, name, sizeStr string, result *StorageInfo) error {
+func (l *local) dealDefaultMedium(ctx context.Context, opts *workflow.CreateContext, sandboxID, name, sizeStr string, result *StorageInfo) error {
 	size, err := resource.ParseQuantity(sizeStr)
 	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
 	if err != nil {
@@ -1240,10 +1321,11 @@ func (l *local) dealDefaultMedium(ctx context.Context, sandboxID, name, sizeStr 
 	sizes := normalizeRootfsSizes(size)
 
 	if l.useCowStorage() {
-		if err := l.ensureCowManager(); err != nil {
+		store, err := l.storeForBackend(createContextStorageBackend(opts))
+		if err != nil {
 			return err
 		}
-		volume, err := l.cowManager.CreateDefaultMediumVolume(ctx, sandboxID, name, uint64(sizes.backendAllocSize.Value()))
+		volume, err := store.CreateDefaultMediumVolume(ctx, sandboxID, name, uint64(sizes.backendAllocSize.Value()))
 		if err != nil {
 			log.G(ctx).Errorf("allocate storage fail:%v", err)
 			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate storage fail:%v", err)
@@ -1335,7 +1417,7 @@ func (l *local) destroy(ctx context.Context, info *StorageInfo, opts *workflow.D
 		errs = errors.Join(errs, err)
 	}
 
-	if err := l.destroyDefaultMediumVolumes(ctx, info); err != nil {
+	if err := l.destroyDefaultMediumVolumes(ctx, info, opts); err != nil {
 		errs = errors.Join(errs, err)
 	}
 
@@ -1354,22 +1436,23 @@ func (l *local) destroy(ctx context.Context, info *StorageInfo, opts *workflow.D
 	return nil
 }
 
-func (l *local) destroyDefaultMediumVolumes(ctx context.Context, info *StorageInfo) error {
+func (l *local) destroyDefaultMediumVolumes(ctx context.Context, info *StorageInfo, opts *workflow.DestroyContext) error {
 	var errs error
+	var store cow.Store
 	for _, v := range info.Volumes {
 		if v == nil {
 			continue
 		}
 		if v.VolumeName != "" {
-			if err := l.ensureCowManager(); err != nil {
-				errs = errors.Join(errs, err)
-				continue
+			if store == nil {
+				selected, err := l.storeForBackend(destroyStorageBackend(info, opts))
+				if err != nil {
+					errs = errors.Join(errs, err)
+					continue
+				}
+				store = selected
 			}
-			if l.cowManager == nil {
-				errs = errors.Join(errs, fmt.Errorf("cubecow manager not initialized for volume %s", v.VolumeName))
-				continue
-			}
-			err := l.cowManager.DeleteByKind(ctx, v.VolumeName, v.Kind)
+			err := store.DeleteByKind(ctx, v.VolumeName, v.Kind)
 			if err != nil {
 				errs = errors.Join(errs, err)
 				log.G(ctx).Fatalf("delete cubecow object:%s kind:%s fail:%v", v.VolumeName, v.Kind, err)
@@ -1657,6 +1740,7 @@ type StorageInfo struct {
 
 	InstanceType string    `json:"instanceType,omitempty"`
 	TemplateID   string    `json:"templateId,omitempty"`
+	Backend      string    `json:"backend,omitempty"`
 	CreateAt     time.Time `json:"createAt,omitempty"`
 	UpdateAt     time.Time `json:"updateAt,omitempty"`
 

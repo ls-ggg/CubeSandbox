@@ -133,6 +133,7 @@ type TemplateInfo struct {
 	OriginHostFactsJSON       string          `json:"origin_host_facts_json,omitempty"`
 	DisplayName               string          `json:"display_name,omitempty"`
 	StorageBackend            string          `json:"storage_backend,omitempty"`
+	Backend                   string          `json:"backend,omitempty"`
 	Retain                    bool            `json:"retain,omitempty"`
 	RootfsSizeBytesAtSnapshot uint64          `json:"rootfs_size_bytes_at_snapshot,omitempty"`
 	LastError                 string          `json:"last_error,omitempty"`
@@ -163,6 +164,7 @@ func templateInfoFromDefinition(def models.TemplateDefinition) TemplateInfo {
 		OriginHostFactsJSON:       def.OriginHostFactsJSON,
 		DisplayName:               def.DisplayName,
 		StorageBackend:            def.StorageBackend,
+		Backend:                   def.StorageBackend,
 		Retain:                    def.Retain,
 		RootfsSizeBytesAtSnapshot: def.RootfsSizeBytesAtSnapshot,
 		LastError:                 def.LastError,
@@ -622,6 +624,7 @@ func createReplicaOnNode(ctx context.Context, target *node.Node, req *sandboxtyp
 	rsp, err := cubelet.AppSnapshot(ctx, cubelet.GetCubeletAddr(target.HostIP()), &cubeboxv1.AppSnapshotRequest{
 		CreateRequest: cubeletReq,
 		SnapshotDir:   req.SnapshotDir,
+		Backend:       storageBackendFromCreate(nodeReq),
 	})
 	if err != nil {
 		replica.Phase = ReplicaPhaseFailed
@@ -727,7 +730,9 @@ func createDefinitionWithOptions(ctx context.Context, templateID string, storedR
 // wrapper around createDefinitionWithOptions for callers that don't set an
 // alias.
 func createDefinition(ctx context.Context, templateID string, storedReq *sandboxtypes.CreateCubeSandboxReq, instanceType, version string) error {
-	return createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, definitionCreateOptions{})
+	return createDefinitionWithOptions(ctx, templateID, storedReq, instanceType, version, definitionCreateOptions{
+		StorageBackend: storageBackendFromCreate(storedReq),
+	})
 }
 
 // ensureTemplateDefinitionWithOptions checks whether a definition already exists
@@ -1513,6 +1518,9 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 					return err
 				}
 				req = parsed
+				if err = applyStoredCreateBackend(req, rec.Backend); err != nil {
+					return err
+				}
 				if err = setTemplateRequestCache(templateID, req); err != nil {
 					log.G(ctx).Warnf("set snapshot request cache fail, snapshot=%s err=%v", templateID, err)
 				}
@@ -1533,6 +1541,9 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 				req.Annotations = make(map[string]string)
 			}
 			constants.NormalizeAppSnapshotAnnotations(req.Annotations)
+			if err = applyStoredCreateBackend(req, def.StorageBackend); err != nil {
+				return err
+			}
 			if err = setTemplateRequestCache(templateID, req); err != nil {
 				log.G(ctx).Warnf("set template request cache fail, template=%s err=%v", templateID, err)
 			}

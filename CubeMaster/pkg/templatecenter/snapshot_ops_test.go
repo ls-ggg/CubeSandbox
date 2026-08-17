@@ -625,7 +625,7 @@ func TestRunSnapshotDeleteJobCleansTemplateJobs(t *testing.T) {
 		return nil, nil
 	})
 	patches.ApplyFunc(invalidateTemplateCaches, func(templateID string) {})
-	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
+	runReplicaCleanup = func(ctx context.Context, templateID string, locators []templateCleanupLocator, _ string) error {
 		return nil
 	}
 	runMetadataCleanup = func(ctx context.Context, templateID string) error {

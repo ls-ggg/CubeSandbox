@@ -65,6 +65,8 @@ type SnapshotCatalogEntry struct {
 	// snapshot for backward compatibility.
 	Kind      string `json:"kind,omitempty"`
 	CreatedAt string `json:"created_at,omitempty"`
+	// Backend is xfs|s3. Empty on legacy catalog.json means xfs.
+	Backend string `json:"backend,omitempty"`
 }
 
 // Catalog entry kinds. See SnapshotCatalogEntry.Kind.
@@ -223,6 +225,11 @@ func WriteSnapshotCatalogFor(backend string, entry *SnapshotCatalogEntry) error 
 	catalogDir := entry.MetaDir
 	if entry.CreatedAt == "" {
 		entry.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if strings.TrimSpace(entry.Backend) == "" {
+		entry.Backend = catalogBackendKey(backend)
+	} else if normalized, err := cow.NormalizeBackend(entry.Backend); err == nil {
+		entry.Backend = normalized
 	}
 	if err := os.MkdirAll(catalogDir, 0o755); err != nil {
 		return fmt.Errorf("ensure snapshot dir: %w", err)

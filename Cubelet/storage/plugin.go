@@ -192,17 +192,11 @@ func (c *Config) cowReflinkRootDir() (string, error) {
 	return defaultReflinkAutoRootDir(c.DataPath), nil
 }
 
-// defaultReflinkAutoRootDir picks the cubecow reflink pool. Existing
-// deployments keep `<work>/cubecow-reflink` when that volumes dir is
-// already present; new installs use `<work>/xfs/objects`.
+// defaultReflinkAutoRootDir is the cubecow reflink pool: <work>/xfs/objects.
 func defaultReflinkAutoRootDir(dataPath string) string {
 	work := stripStoragePluginDataDir(filepath.Clean(dataPath))
 	if work == "" || work == "." {
 		work = filepath.Join(constants.CubeConfigBasePath, "storage")
-	}
-	legacy := filepath.Join(work, "cubecow-reflink")
-	if st, err := os.Stat(filepath.Join(legacy, "volumes")); err == nil && st.IsDir() {
-		return legacy
 	}
 	return filepath.Join(work, cow.BackendXFS, SnapshotObjectsDir)
 }
@@ -348,8 +342,7 @@ func init() {
 				return nil, err
 			}
 
-			xfsRoots := append(catalogKindRoots(cow.BackendXFS), constants.DefaultSnapshotDir)
-			SetSnapshotCatalogRootsFor(cow.BackendXFS, xfsRoots...)
+			SetSnapshotCatalogRootsFor(cow.BackendXFS, catalogKindRoots(cow.BackendXFS)...)
 			SetSnapshotCatalogRootsFor(cow.BackendS3, catalogKindRoots(cow.BackendS3)...)
 
 			return localStorage, nil

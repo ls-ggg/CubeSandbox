@@ -164,6 +164,7 @@ impl SandboxService {
             distribution_scope,
             env_vars,
             volume_mounts,
+            backend,
             ..
         } = body;
         if let Some(env_vars) = env_vars.as_ref() {
@@ -268,6 +269,7 @@ impl SandboxService {
             cube_network_config,
             auto_pause,
             auto_resume,
+            backend,
         };
 
         let resp = self
@@ -1750,6 +1752,7 @@ mod tests {
             cube_network_config: None,
             auto_pause: false,
             auto_resume: false,
+            backend: None,
         };
 
         // Both false → both fields are omitted (skip_serializing_if = Not::not).
@@ -1871,6 +1874,7 @@ mod tests {
             cube_network_config: None,
             auto_pause: false,
             auto_resume: false,
+            backend: None,
         }
     }
 
@@ -2080,6 +2084,7 @@ mod tests {
                 env_vars: None,
                 mcp: None,
                 volume_mounts: None,
+                backend: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -2166,6 +2171,7 @@ mod tests {
                 env_vars: Some(env_vars),
                 mcp: None,
                 volume_mounts: None,
+                backend: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -2243,6 +2249,7 @@ mod tests {
                 env_vars: None,
                 mcp: None,
                 volume_mounts: None,
+                backend: None,
             })
             .await
             .expect("sandbox create should succeed");
@@ -2323,6 +2330,7 @@ mod tests {
                         read_only: false,
                     },
                 ]),
+                backend: None,
             })
             .await
             .expect("sandbox create should succeed");

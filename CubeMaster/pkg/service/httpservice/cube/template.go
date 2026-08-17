@@ -32,6 +32,8 @@ type templateResponse struct {
 	Status                     string                         `json:"status,omitempty"`
 	LastError                  string                         `json:"last_error,omitempty"`
 	DisplayName                string                         `json:"display_name,omitempty"`
+	StorageBackend             string                         `json:"storage_backend,omitempty"`
+	Backend                    string                         `json:"backend,omitempty"`
 	CreatedAt                  string                         `json:"created_at,omitempty"`
 	ImageInfo                  string                         `json:"image_info,omitempty"`
 	JobID                      string                         `json:"job_id,omitempty"`
@@ -48,15 +50,17 @@ type templateListResponse struct {
 }
 
 type templateSummary struct {
-	TemplateID   string `json:"template_id,omitempty"`
-	InstanceType string `json:"instance_type,omitempty"`
-	Version      string `json:"version,omitempty"`
-	Status       string `json:"status,omitempty"`
-	LastError    string `json:"last_error,omitempty"`
-	DisplayName  string `json:"display_name,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	ImageInfo    string `json:"image_info,omitempty"`
-	JobID        string `json:"job_id,omitempty"`
+	TemplateID     string `json:"template_id,omitempty"`
+	InstanceType   string `json:"instance_type,omitempty"`
+	Version        string `json:"version,omitempty"`
+	Status         string `json:"status,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	DisplayName    string `json:"display_name,omitempty"`
+	StorageBackend string `json:"storage_backend,omitempty"`
+	Backend        string `json:"backend,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	ImageInfo      string `json:"image_info,omitempty"`
+	JobID          string `json:"job_id,omitempty"`
 }
 
 type deleteTemplateRequest struct {
@@ -121,6 +125,8 @@ func templateResponseFromInfo(info *templatecenter.TemplateInfo, createReq *type
 		Status:                     info.Status,
 		LastError:                  info.LastError,
 		DisplayName:                info.DisplayName,
+		StorageBackend:             info.StorageBackend,
+		Backend:                    firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
 		CreatedAt:                  info.CreatedAt,
 		ImageInfo:                  info.ImageInfo,
 		JobID:                      info.JobID,
@@ -449,15 +455,17 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	}
 	for _, info := range infos {
 		rsp.Data = append(rsp.Data, templateSummary{
-			TemplateID:   info.TemplateID,
-			InstanceType: info.InstanceType,
-			Version:      info.Version,
-			Status:       info.Status,
-			LastError:    info.LastError,
-			DisplayName:  info.DisplayName,
-			CreatedAt:    info.CreatedAt,
-			ImageInfo:    info.ImageInfo,
-			JobID:        info.JobID,
+			TemplateID:     info.TemplateID,
+			InstanceType:   info.InstanceType,
+			Version:        info.Version,
+			Status:         info.Status,
+			LastError:      info.LastError,
+			DisplayName:    info.DisplayName,
+			StorageBackend: info.StorageBackend,
+			Backend:        firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
+			CreatedAt:      info.CreatedAt,
+			ImageInfo:      info.ImageInfo,
+			JobID:          info.JobID,
 		})
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)

@@ -490,6 +490,9 @@ func dealCubeboxCreateReqWithTemplateCenter(ctx context.Context, templateID stri
 	}
 
 	applyTemplateAnnotationsAndLabels(templateReq, reqInOut)
+	if err := templatecenter.InheritCreateBackendFromTemplate(reqInOut, templateReq); err != nil {
+		return err
+	}
 	if !strings.EqualFold(templateKind, templatecenter.TemplateKindSnapshot) {
 		if err := bindAppSnapshotTemplateReplica(ctx, templateID, reqInOut); err != nil {
 			return err

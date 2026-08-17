@@ -107,7 +107,7 @@ func deleteTemplateWithTargets(ctx context.Context, templateID string, targets *
 			return ErrTemplateInUse
 		}
 	}
-	if err := runReplicaCleanup(ctx, templateID, targets.Locators); err != nil {
+	if err := runReplicaCleanup(ctx, templateID, targets.Locators, cleanupBackendFromTargets(targets)); err != nil {
 		return err
 	}
 	if err := runArtifactCleanup(ctx, templateID, targets); err != nil {
@@ -317,10 +317,11 @@ func cleanupTemplateReplicas(ctx context.Context, templateID string) error {
 	if err != nil {
 		return err
 	}
-	return cleanupTemplateReplicasWithLocators(ctx, templateID, targets.Locators)
+	return cleanupTemplateReplicasWithLocators(ctx, templateID, targets.Locators, cleanupBackendFromTargets(targets))
 }
 
-func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string, locators []templateCleanupLocator) error {
+func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string, locators []templateCleanupLocator, backend string) error {
+	backend = pinnedCleanupBackend(backend)
 	var cleanupErr error
 	for _, locator := range locators {
 		hostIP := locator.NodeIP
@@ -339,6 +340,7 @@ func cleanupTemplateReplicasWithLocators(ctx context.Context, templateID string,
 		rsp, err := cleanupTemplateOnCubelet(ctx, getCubeletAddrForDelete(hostIP), &cubeboxv1.CleanupTemplateRequest{
 			RequestID:  uuid.NewString(),
 			TemplateID: templateID,
+			Backend:    backend,
 		})
 		if err != nil {
 			if isIgnorableTemplateCleanupError(err) {

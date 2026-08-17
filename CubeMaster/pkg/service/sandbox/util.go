@@ -282,6 +282,10 @@ func ConstructCubeletReq(ctx context.Context, req *types.CreateCubeSandboxReq) (
 		Namespace:         req.Namespace,
 		CubeNetworkConfig: mapCubeNetworkConfig(req.CubeNetworkConfig),
 	}
+	if b, ok, err := constants.OptionalSnapshotBackend(req.Backend); err == nil && ok {
+		out.Backend = b
+		out.Annotations[constants.CubeAnnotationStorageBackend] = b
+	}
 	log.G(ctx).Infof(
 		"ConstructCubeletReq: instance_type=%s network_type=%s cube_network_config=%s",
 		req.InstanceType,

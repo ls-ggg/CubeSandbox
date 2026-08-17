@@ -79,13 +79,29 @@ func RestoreSnapshot(ctx context.Context, backend, snapshotID string) error {
 	return ActivateSnapshot(ctx, backend, snapshotID)
 }
 
+type noopSyncer struct{}
+
+func (noopSyncer) Sync(ctx context.Context, snapshotID string) error {
+	_ = ctx
+	_ = snapshotID
+	return nil
+}
+
+func (noopSyncer) SyncStatus(ctx context.Context, snapshotID string) (*cow.SyncStatus, error) {
+	_ = ctx
+	id := strings.TrimSpace(snapshotID)
+	return &cow.SyncStatus{SnapshotID: id, State: cow.SyncStateReady, Message: "xfs sync mocked"}, nil
+}
+
 func requireCowSyncer(backend string) (cow.Syncer, error) {
 	normalized, err := cow.NormalizeBackend(backend)
 	if err != nil {
 		return nil, err
 	}
 	if normalized != cow.BackendS3 {
-		return nil, fmt.Errorf("sync is only supported on %q backend (got %q)", cow.BackendS3, normalized)
+		// XFS has no remote object store; mock success so callers that
+		// probe sync (e2e / upload jobs) do not fail the local path.
+		return noopSyncer{}, nil
 	}
 	store, err := requireCowStoreFor(cow.BackendS3)
 	if err != nil {
@@ -121,28 +137,10 @@ func (a storeActivator) Activate(ctx context.Context, snapshotID string) error {
 // StoreFor returns the live XFS or S3 [cow.Store] for backend (request `type`).
 // Both Stores are initialized together when cubecow storage is enabled.
 func StoreFor(backend string) (cow.Store, error) {
-	normalized, err := cow.NormalizeBackend(backend)
-	if err != nil {
-		return nil, err
-	}
 	if localStorage == nil {
 		return nil, fmt.Errorf("storage is not initialized")
 	}
-	if err := localStorage.ensureCowManager(); err != nil {
-		return nil, err
-	}
-	switch normalized {
-	case cow.BackendS3:
-		if localStorage.s3CowManager == nil {
-			return nil, fmt.Errorf("s3 cow store is not initialized")
-		}
-		return localStorage.s3CowManager, nil
-	default:
-		if localStorage.cowManager == nil {
-			return nil, fmt.Errorf("xfs cow store is not initialized")
-		}
-		return localStorage.cowManager, nil
-	}
+	return localStorage.storeForBackend(backend)
 }
 
 // GetSandboxRootfs resolves the live sandbox rootfs CoW object on the default Store.

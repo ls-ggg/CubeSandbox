@@ -142,6 +142,7 @@ func TestTryDeletePausedReadyUsesTombstone(t *testing.T) {
 	require.Equal(t, "true", (*destroys)[0].req.Annotations[constants.CubeAnnotationPauseDeleteTombstone])
 	require.Len(t, *cleans, 1)
 	require.Equal(t, "snap-ready000000000000000001", (*cleans)[0].req.TemplateID)
+	require.Equal(t, constants.SnapshotBackendXFS, (*cleans)[0].req.Backend)
 
 	_, err = GetBySandbox(context.Background(), "sb-ready")
 	require.ErrorIs(t, err, ErrNotFound)

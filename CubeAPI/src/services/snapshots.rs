@@ -363,11 +363,13 @@ fn rollback_conflict(sandbox_id: &str, snapshot_id: &str) -> AppError {
 
 fn snapshot_resource_to_info(r: SnapshotResource) -> SnapshotInfo {
     let names = snapshot_names(&r);
+    let backend = snapshot_backend(&r);
+    let remote_status = optional_backend(&r.remote_status);
     SnapshotInfo {
         snapshot_id: r.snapshot_id,
         names,
-        backend: snapshot_backend(&r),
-        remote_status: optional_backend(&r.remote_status),
+        backend,
+        remote_status,
     }
 }
 
@@ -411,6 +413,8 @@ fn normalized_status(status: Option<&str>) -> String {
 
 fn snapshot_resource_to_list_item(r: SnapshotResource) -> SnapshotListItem {
     let names = snapshot_names(&r);
+    let backend = snapshot_backend(&r);
+    let remote_status = optional_backend(&r.remote_status);
     SnapshotListItem {
         snapshot_id: r.snapshot_id,
         names,
@@ -422,8 +426,8 @@ fn snapshot_resource_to_list_item(r: SnapshotResource) -> SnapshotListItem {
         },
         created_at: r.created_at,
         updated_at: r.updated_at,
-        backend: snapshot_backend(&r),
-        remote_status: optional_backend(&r.remote_status),
+        backend,
+        remote_status,
     }
 }
 

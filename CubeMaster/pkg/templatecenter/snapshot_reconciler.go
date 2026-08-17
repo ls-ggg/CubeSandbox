@@ -274,7 +274,7 @@ func reconcileSnapshotReplicaPresence(ctx context.Context) error {
 				_ = cleanupTemplateReplicasWithLocators(ctx, rec.SnapshotID, []templateCleanupLocator{{
 					NodeID: model.NodeID,
 					NodeIP: model.NodeIP,
-				}})
+				}}, pinnedCleanupBackend(rec.Backend))
 				_ = UpsertReplica(ctx, rec.SnapshotID, model.InstanceType, failedReplicaStatus(model, msg))
 				_ = updateSnapshotFields(ctx, rec.SnapshotID, map[string]any{
 					"status":     StatusFailed,

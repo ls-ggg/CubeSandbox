@@ -66,7 +66,7 @@ func TryDeletePaused(ctx context.Context, requestID, sandboxID, hostIP string) (
 		return true, err
 	}
 
-	if err := cleanupPauseSnapshotOnCubelet(ctx, addr, requestID, rec.SnapshotID); err != nil {
+	if err := cleanupPauseSnapshotOnCubelet(ctx, addr, requestID, rec.SnapshotID, rec.Backend); err != nil {
 		return true, err
 	}
 	if err := Delete(ctx, rec.SnapshotID); err != nil {
@@ -130,10 +130,16 @@ func checkDestroyRet(destroyRsp *cubebox.DestroyCubeSandboxResponse, sandboxID, 
 	return fmt.Errorf("%s %s ret=%v msg=%s", what, sandboxID, code, msg)
 }
 
-func cleanupPauseSnapshotOnCubelet(ctx context.Context, addr, requestID, snapshotID string) error {
+func cleanupPauseSnapshotOnCubelet(ctx context.Context, addr, requestID, snapshotID, backend string) error {
+	if normalized, ok, err := constants.OptionalSnapshotBackend(backend); err == nil && ok {
+		backend = normalized
+	} else {
+		backend = ""
+	}
 	rsp, err := cleanupTemplateOnCubelet(ctx, addr, &cubebox.CleanupTemplateRequest{
 		RequestID:  requestID,
 		TemplateID: snapshotID,
+		Backend:    backend,
 	})
 	if err != nil {
 		return fmt.Errorf("cleanup pause snap %s: %w", snapshotID, err)

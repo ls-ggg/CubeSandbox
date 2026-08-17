@@ -260,6 +260,10 @@ pub struct NewSandbox {
 
     #[serde(rename = "volumeMounts", skip_serializing_if = "Option::is_none")]
     pub volume_mounts: Option<Vec<SandboxVolumeMount>>,
+
+    /// CoW backend (xfs | s3). Omitted = inherit from the template, else xfs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 // ─── Sandbox — create / connect response ──────────────────────────────────

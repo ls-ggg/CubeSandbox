@@ -56,6 +56,9 @@ func TestSnapshotCatalogNamespacesAreIsolated(t *testing.T) {
 	if got.RootfsVol != "s3-rootfs" {
 		t.Fatalf("s3 catalog rootfs=%q", got.RootfsVol)
 	}
+	if got.Backend != cow.BackendS3 {
+		t.Fatalf("s3 catalog backend=%q, want s3", got.Backend)
+	}
 }
 
 func TestS3CatalogLivesUnderMetadata(t *testing.T) {

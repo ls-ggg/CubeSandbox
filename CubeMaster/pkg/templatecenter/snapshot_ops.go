@@ -317,14 +317,14 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		Backend:     commitBackend,
 	})
 	if err != nil {
-		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, "", nil, err)
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, "", nil, err, commitBackend)
 	}
 	if commitRsp.GetRet() == nil || int(commitRsp.GetRet().GetRetCode()) != int(errorcode.ErrorCode_Success) {
 		msg := "commit sandbox failed"
 		if commitRsp.GetRet() != nil && strings.TrimSpace(commitRsp.GetRet().GetRetMsg()) != "" {
 			msg = commitRsp.GetRet().GetRetMsg()
 		}
-		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, commitRsp.GetSnapshotPath(), commitRsp, errors.New(msg))
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, commitRsp.GetSnapshotPath(), commitRsp, errors.New(msg), commitBackend)
 	}
 
 	snapshotPath := commitRsp.GetSnapshotPath()
@@ -355,7 +355,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"progress": 85,
 	})
 	if err := UpsertReplica(ctx, snapshotID, createReq.InstanceType, replica); err != nil {
-		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err)
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
 	}
 	setTemplateLocalityCache(snapshotID, []ReplicaStatus{replica})
 	registerTemplateReplicaForSnapshot(snapshotID, nodeID, 1)
@@ -368,7 +368,7 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		"last_error":                    "",
 		"rootfs_size_bytes_at_snapshot": commitRsp.GetRootfsSizeBytes(),
 	}); err != nil {
-		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err)
+		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
 	}
 	// Commit yields a single authoritative envd version; persist it (best-effort)
 	// to the snapshot definition annotation so created sandboxes inherit it.
@@ -772,7 +772,7 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 	if err != nil {
 		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
 	}
-	if err := runReplicaCleanup(ctx, snapshotID, locators); err != nil {
+	if err := runReplicaCleanup(ctx, snapshotID, locators, cleanupBackendFromTargets(targets)); err != nil {
 		return failSnapshotDeleteJob(ctx, jobID, snapshotID, err)
 	}
 	if err := runMetadataCleanup(ctx, snapshotID); err != nil {
@@ -788,7 +788,7 @@ func runSnapshotDeleteJob(ctx context.Context, jobID, snapshotID string) error {
 	return nil
 }
 
-func failSnapshotCreateJob(ctx context.Context, jobID, snapshotID, nodeIP, snapshotPath string, commitRsp *cubeboxv1.CommitSandboxResponse, cause error) error {
+func failSnapshotCreateJob(ctx context.Context, jobID, snapshotID, nodeIP, snapshotPath string, commitRsp *cubeboxv1.CommitSandboxResponse, cause error, backend string) error {
 	// v4+: master no longer sends SnapshotPath/Objects to cubelet. The
 	// catalog entry written during CommitSandbox carries everything cubelet
 	// needs to clean up; the snapshotPath / commitRsp arguments are retained
@@ -799,6 +799,7 @@ func failSnapshotCreateJob(ctx context.Context, jobID, snapshotID, nodeIP, snaps
 		_, _ = cubelet.CleanupTemplate(ctx, cubelet.GetCubeletAddr(nodeIP), &cubeboxv1.CleanupTemplateRequest{
 			RequestID:  uuid.NewString(),
 			TemplateID: snapshotID,
+			Backend:    pinnedCleanupBackend(backend),
 		})
 	}
 	_ = deleteReplicasByTemplateID(ctx, snapshotID)
@@ -1133,8 +1134,8 @@ func createDefinitionTx(ctx context.Context, tx *gorm.DB, templateID string, sto
 		RootfsArtifactID:          rootfsArtifactIDFromCreateRequest(storedReq),
 		RequestJSON:               string(payload),
 	}
-	if kind == TemplateKindSnapshot && model.StorageBackend == "" {
-		model.StorageBackend = StorageBackendCow
+	if normalized, ok, err := constants.OptionalSnapshotBackend(model.StorageBackend); err == nil && ok {
+		model.StorageBackend = normalized
 	}
 	if err := tx.Table(constants.TemplateDefinitionTableName).Create(model).Error; err != nil {
 		if strings.Contains(err.Error(), "1062") || strings.Contains(err.Error(), "Duplicate entry") {

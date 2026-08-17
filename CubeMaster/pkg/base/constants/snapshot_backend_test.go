@@ -38,6 +38,36 @@ func TestNormalizeSnapshotBackend(t *testing.T) {
 	}
 }
 
+func TestResolveSnapshotBackend(t *testing.T) {
+	t.Parallel()
+	got, err := ResolveSnapshotBackend("", "  ", "s3")
+	if err != nil {
+		t.Fatalf("ResolveSnapshotBackend err=%v", err)
+	}
+	if got != SnapshotBackendS3 {
+		t.Fatalf("ResolveSnapshotBackend=%q, want s3", got)
+	}
+	got, err = ResolveSnapshotBackend("", "")
+	if err != nil {
+		t.Fatalf("empty ResolveSnapshotBackend err=%v", err)
+	}
+	if got != SnapshotBackendXFS {
+		t.Fatalf("empty ResolveSnapshotBackend=%q, want xfs", got)
+	}
+}
+
+func TestOptionalSnapshotBackend(t *testing.T) {
+	t.Parallel()
+	got, ok, err := OptionalSnapshotBackend("", "")
+	if err != nil || ok || got != "" {
+		t.Fatalf("empty OptionalSnapshotBackend got=(%q,%v,%v)", got, ok, err)
+	}
+	got, ok, err = OptionalSnapshotBackend("", "s3")
+	if err != nil || !ok || got != SnapshotBackendS3 {
+		t.Fatalf("OptionalSnapshotBackend s3 got=(%q,%v,%v)", got, ok, err)
+	}
+}
+
 func TestSnapshotRemoteStatus(t *testing.T) {
 	t.Parallel()
 	if got := SnapshotRemoteStatus(SnapshotBackendS3); got != RemoteStatusPending {
