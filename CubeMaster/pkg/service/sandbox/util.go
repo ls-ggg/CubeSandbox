@@ -73,9 +73,21 @@ func checkAndGetReqResource(req *types.CreateCubeSandboxReq) (*selctx.RequestRes
 				res.EnforceSnapshotStorage = true
 			}
 		}
+		if strings.EqualFold(strings.TrimSpace(req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal]), "true") {
+			res.AllowNonLocalTemplate = true
+			res.EnforceSnapshotStorage = false
+			if len(req.DistributionScope) > 0 && len(res.TemplateNodeScope) == 0 {
+				res.TemplateNodeScope = append([]string(nil), req.DistributionScope...)
+			}
+		}
 	}
 
 	return res, nil
+}
+
+// RequestResources exposes checkAndGetReqResource for restore placement.
+func RequestResources(req *types.CreateCubeSandboxReq) (*selctx.RequestResource, error) {
+	return checkAndGetReqResource(req)
 }
 
 func checkParam(req *types.CreateCubeSandboxReq) error {

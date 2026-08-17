@@ -45,6 +45,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/refcount"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -969,7 +970,7 @@ func (l *local) resolveSnapshotMemoryVolFromCatalog(ctx context.Context, annotat
 	if logicalID == "" {
 		return "", "", nil
 	}
-	entry, err := GetLocalSnapshot(ctx, logicalID)
+	entry, err := GetLocalSnapshotFor(ctx, annotations[constants.MasterAnnotationStorageBackend], logicalID)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve snapshot %s from local catalog: %w", logicalID, err)
 	}
@@ -1016,11 +1017,11 @@ func (l *local) prepareDefaultMedium(ctx context.Context, opts *workflow.CreateC
 			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 		}
 	} else if hasSnapshotTemplate && !opts.IsCubeboxV2() {
-		if err := l.dealCubeboxSnapV1Medium(ctx, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
+		if err := l.dealCubeboxSnapV1Medium(ctx, opts, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
 			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 		}
 	} else if hasSnapshotTemplate && opts.IsCubeboxV2() && l.useCowStorage() {
-		if err := l.dealCowV2SandboxDefaultMedium(ctx, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
+		if err := l.dealCowV2SandboxDefaultMedium(ctx, opts, opts.SandboxID, templateID, v.Name, sizeLimit, result); err != nil {
 			return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 		}
 	} else if err := l.dealDefaultMedium(ctx, opts.SandboxID, v.Name, sizeLimit, result); err != nil {
@@ -1096,7 +1097,7 @@ func (l *local) dealCowTemplateBuildRootfs(ctx context.Context, templateID, name
 	return nil
 }
 
-func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
+func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
 	size, err := resource.ParseQuantity(sizeStr)
 	log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
 	if err != nil {
@@ -1107,7 +1108,7 @@ func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, sandboxID, te
 		return err
 	}
 	sizes := normalizeRootfsSizes(size)
-	volume, err := l.cowManager.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, uint64(sizes.backendAllocSize.Value()))
+	volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
 	if err != nil {
 		log.G(ctx).Errorf("derive v2 default-medium from template fail: %v", err)
 		return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "derive v2 default-medium from template fail: %v", err)
@@ -1116,7 +1117,64 @@ func (l *local) dealCowV2SandboxDefaultMedium(ctx context.Context, sandboxID, te
 	return nil
 }
 
-func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
+func createContextStorageBackend(opts *workflow.CreateContext) string {
+	if opts == nil || opts.ReqInfo == nil {
+		return cow.BackendXFS
+	}
+	if raw := strings.TrimSpace(opts.ReqInfo.GetBackend()); raw != "" {
+		if backend, err := cow.NormalizeBackend(raw); err == nil {
+			return backend
+		}
+	}
+	backend, err := cow.NormalizeBackend(opts.ReqInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+	if err != nil {
+		return cow.BackendXFS
+	}
+	return backend
+}
+
+func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID string, desiredSizeBytes uint64) (*cowVolume, error) {
+	backend := createContextStorageBackend(opts)
+	store, err := StoreFor(backend)
+	if err != nil {
+		return nil, err
+	}
+	if opts != nil && opts.IsPauseResume() {
+		if err := ActivateSnapshot(ctx, backend, templateID); err != nil {
+			return nil, err
+		}
+		return attachExistingSnapshotRootfs(ctx, store, backend, templateID)
+	}
+	return store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
+}
+
+func attachExistingSnapshotRootfs(ctx context.Context, store cow.Store, backend, snapshotID string) (*cowVolume, error) {
+	refs := activateObjectRefs(ctx, backend, snapshotID)
+	var rootfs *CowObjectRef
+	for i := range refs {
+		if refs[i].Role == "rootfs" {
+			rootfs = &refs[i]
+			break
+		}
+	}
+	if rootfs == nil || strings.TrimSpace(rootfs.Name) == "" {
+		return nil, fmt.Errorf("%w: snapshot %s has no rootfs object", ErrCowObjectMissing, snapshotID)
+	}
+	info, err := store.GetVolumeInfo(ctx, rootfs.Name)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		return nil, fmt.Errorf("%w: snapshot %s object %s", ErrCowObjectMissing, snapshotID, rootfs.Name)
+	}
+	dev, err := store.ResolveDevPath(ctx, rootfs.Name, rootfs.Kind)
+	if err != nil {
+		return nil, fmt.Errorf("activate snapshot %s rootfs %s: %w", snapshotID, rootfs.Name, err)
+	}
+	return newCowVolume(rootfs.Name, rootfs.Kind, 0, dev), nil
+}
+
+func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
 	if l.useCowStorage() {
 		size, err := resource.ParseQuantity(sizeStr)
 		log.G(ctx).Debugf("req GetEmptyDir:%+v,vName:%s", sizeStr, name)
@@ -1128,7 +1186,7 @@ func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, sandboxID, template
 			return err
 		}
 		sizes := normalizeRootfsSizes(size)
-		volume, err := l.cowManager.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, uint64(sizes.backendAllocSize.Value()))
+		volume, err := l.allocateSnapshotRootfs(ctx, opts, sandboxID, templateID, uint64(sizes.backendAllocSize.Value()))
 		if err != nil {
 			log.G(ctx).Errorf("allocate cubebox storage fail:%v", err)
 			return ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "allocate cubebox storage fail:%v", err)

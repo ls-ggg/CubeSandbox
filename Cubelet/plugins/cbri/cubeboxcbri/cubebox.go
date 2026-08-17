@@ -81,8 +81,9 @@ type snapshotConfig struct {
 }
 
 type snapshotPaths struct {
-	Base string
-	Spec string
+	Base   string
+	Spec   string
+	ResDir string
 }
 
 type cubeboxInstancePlugin struct {
@@ -188,6 +189,9 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 			}
 			paths, err := e.resolveSnapshotPaths(templateID, flowOpts.LocalRunTemplate.Snapshot.Snapshot.Path, flowOpts.ReqInfo)
 			if err != nil {
+				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+			}
+			if err := storage.EnsureShimSpecDirLink(paths.Base, paths.ResDir); err != nil {
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 			}
 			snapBasePath = paths.Base
@@ -509,21 +513,24 @@ func (e *cubeboxInstancePlugin) resolveSnapshotPaths(templateID, rawPath string,
 	if path == "" {
 		base := e.getSnapShotFilePath(templateID)
 		return &snapshotPaths{
-			Base: base,
-			Spec: filepath.Join(base, resDir),
+			Base:   base,
+			Spec:   filepath.Join(base, resDir),
+			ResDir: resDir,
 		}, nil
 	}
 
 	if looksLikeSnapshotSpecPath(path) || looksLikeSnapshotSpecDir(path) {
 		return &snapshotPaths{
-			Base: filepath.Dir(path),
-			Spec: path,
+			Base:   filepath.Dir(path),
+			Spec:   path,
+			ResDir: resDir,
 		}, nil
 	}
 
 	return &snapshotPaths{
-		Base: path,
-		Spec: filepath.Join(path, resDir),
+		Base:   path,
+		Spec:   filepath.Join(path, resDir),
+		ResDir: resDir,
 	}, nil
 }
 
@@ -606,11 +613,15 @@ func looksLikeSnapshotSpecPath(path string) bool {
 }
 
 func looksLikeSnapshotSpecDir(path string) bool {
-	base := filepath.Base(filepath.Clean(path))
-	if !strings.HasSuffix(base, "M") || !strings.Contains(base, "C") {
-		return false
+	clean := filepath.Clean(path)
+	base := filepath.Base(clean)
+	if strings.HasSuffix(base, "M") && strings.Contains(base, "C") {
+		return true
 	}
-	return true
+	if _, err := os.Stat(filepath.Join(clean, "snapshot", "config.json")); err == nil {
+		return true
+	}
+	return false
 }
 
 var _ cbri.API = &cubeboxInstancePlugin{}

@@ -20,8 +20,8 @@ import (
 // intentionally left untouched; do not merge mock-S3 logic back into it.
 //
 // create/activate/delete/list currently behave like XFS via the shared cubecow
-// engine. Sync/SyncStatus are in-memory mocks (see s3_sync.go) until a real
-// remote backend exists.
+// engine. Sync/SyncStatus/Restore are mocks until a real remote backend exists
+// (Restore only activates objects that are already local).
 type S3Cow struct {
 	engine cowEngine
 

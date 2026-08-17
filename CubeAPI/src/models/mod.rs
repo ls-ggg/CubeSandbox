@@ -388,6 +388,9 @@ pub struct ConnectSandbox {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateSnapshotRequest {
     pub name: Option<String>,
+    /// CoW backend (xfs | s3). Empty means xfs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 /// Response for POST /sandboxes/{id}/snapshots.
@@ -396,6 +399,12 @@ pub struct SnapshotInfo {
     #[serde(rename = "snapshotID")]
     pub snapshot_id: String,
     pub names: Vec<String>,
+    /// CoW backend that produced this snapshot (xfs | s3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// S3 sync status (pending|running|ready|failed). Empty for xfs.
+    #[serde(rename = "remoteStatus", skip_serializing_if = "Option::is_none")]
+    pub remote_status: Option<String>,
 }
 
 /// Query parameters for GET /snapshots.
@@ -410,6 +419,8 @@ pub struct ListSnapshotsQuery {
     /// Pagination cursor from previous response header x-next-token.
     #[serde(rename = "nextToken")]
     pub next_token: Option<String>,
+    /// Filter by CoW backend (xfs | s3).
+    pub backend: Option<String>,
 }
 
 /// One entry in the GET /snapshots list.
@@ -425,6 +436,12 @@ pub struct SnapshotListItem {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
+    /// CoW backend that produced this snapshot (xfs | s3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// S3 sync status (pending|running|ready|failed). Empty for xfs.
+    #[serde(rename = "remoteStatus", skip_serializing_if = "Option::is_none")]
+    pub remote_status: Option<String>,
 }
 
 /// Request body for POST /sandboxes/{id}/rollback.
@@ -432,6 +449,9 @@ pub struct SnapshotListItem {
 pub struct RollbackRequest {
     #[serde(rename = "snapshotID")]
     pub snapshot_id: String,
+    /// CoW backend (xfs | s3). Empty means Cubelet uses the snapshot catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 /// Response for POST /sandboxes/{id}/rollback after synchronous completion.

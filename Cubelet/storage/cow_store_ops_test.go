@@ -78,6 +78,40 @@ func TestSyncSnapshotMockReady(t *testing.T) {
 	require.Contains(t, err.Error(), "only supported")
 }
 
+func TestActivateSnapshotActivatesLocalObjects(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	require.NoError(t, ActivateSnapshot(context.Background(), cow.BackendS3, "snap-1"))
+	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.activatedVolumes)
+}
+
+func TestActivateSnapshotFailsWhenMissing(t *testing.T) {
+	useTestCowStorage(t, &fakeCowEngine{})
+
+	err := ActivateSnapshot(context.Background(), cow.BackendS3, "snap-missing")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCowObjectMissing)
+}
+
+func TestActivateSnapshotWorksOnXFS(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	require.NoError(t, ActivateSnapshot(context.Background(), cow.BackendXFS, "snap-1"))
+	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.activatedVolumes)
+}
+
 func TestRequireCowStoreNotInitialized(t *testing.T) {
 	prev := localStorage
 	localStorage = nil

@@ -568,6 +568,9 @@ message RunCubeSandboxRequest {
 
   // Egress network policy for the sandbox template/runtime.
   optional CubeNetworkConfig cube_network_config = 16;
+  // CoW backend from Master (xfs｜s3). Empty means xfs.
+  // Used when Create restores from a snapshot / pause-snap.
+  string backend = 17;
 }
 
 message RunCubeSandboxResponse {
@@ -823,6 +826,8 @@ message AppSnapshotRequest {
 
   // Custom snapshot directory path. If empty, uses default path.
   string snapshot_dir = 2;
+  // CoW backend from Master (xfs｜s3). Empty means xfs.
+  string backend = 3;
 }
 
 // AppSnapshotResponse is the response for app snapshot creation.
@@ -868,6 +873,8 @@ message CommitSandboxRequest {
   string templateID = 3;
   // Custom snapshot directory path. If empty, uses default path.
   string snapshot_dir = 4;
+  // CoW backend from Master (xfs｜s3). Empty means xfs.
+  string backend = 5;
 }
 
 message CommitSandboxResponse {
@@ -928,6 +935,8 @@ message RollbackSandboxRequest {
   uint32 new_gen = 7;
   // Minimum rootfs size after deriving the new generation.
   uint64 desired_size = 8;
+  // CoW backend from Master (xfs｜s3). Empty means: use catalog, else xfs.
+  string backend = 9;
 }
 
 message RollbackSandboxResponse {
@@ -979,6 +988,8 @@ message CleanupTemplateRequest {
   // cubelet derives objects from local catalog; legacy masters may still
   // populate this for backward compatibility but new masters MUST send empty.
   repeated CowObjectRef objects = 4;
+  // CoW backend from Master (xfs｜s3). Empty means xfs.
+  string backend = 5;
 }
 
 message CleanupTemplateResponse {
@@ -1002,6 +1013,8 @@ message ListSandboxSnapshotsRequest {
   repeated CowObjectRef objects = 3;
   // Snapshot metadata directory that must remain restorable.
   string meta_dir = 4;
+  // CoW backend from Master (xfs｜s3). Empty means xfs.
+  string backend = 5;
 }
 
 message CowObjectStatus {
@@ -1043,6 +1056,8 @@ message ListSandboxSnapshotsResponse {
 message ListLocalSnapshotsRequest {
   // requestID reqID
   string requestID = 1;
+  // Optional filter. Empty returns all backends.
+  string backend = 2;
 }
 
 message LocalSnapshotInfo {
@@ -1076,6 +1091,8 @@ message LocalSnapshotInfo {
   // Catalog entry kind: "template" (AppSnapshot) or "runtime_snapshot"
   // (CommitSandbox). Empty for pre-v4 legacy entries.
   string kind = 14;
+  // CoW backend that produced this snapshot (xfs｜s3). Empty means xfs.
+  string backend = 15;
 }
 
 message ListLocalSnapshotsResponse {
@@ -1092,6 +1109,8 @@ message GetLocalSnapshotRequest {
   string requestID = 1;
   // Logical snapshot ID to look up.
   string snapshotID = 2;
+  // Optional. When set, must match the catalog backend.
+  string backend = 3;
 }
 
 message GetLocalSnapshotResponse {
@@ -1106,6 +1125,8 @@ message GetLocalSnapshotResponse {
 message GetStorageMetricsRequest {
   // requestID reqID
   string requestID = 1;
+  // CoW backend to read metrics from (xfs｜s3). Empty means xfs.
+  string backend = 2;
 }
 
 message GetStorageMetricsResponse {

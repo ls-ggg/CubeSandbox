@@ -1,0 +1,32 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+
+package cubelet.services.snapshot.v1;
+
+option go_package = "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/snapshot/v1;snapshot";
+
+// Snapshot is Cubelet's snapshot control-plane service.
+// This round exposes Status only (sync state → remote_ready).
+service Snapshot {
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+message StatusRequest {
+  string request_id = 1;
+  string snapshot_id = 2;
+  // xfs | s3; empty defaults to xfs.
+  string backend = 3;
+}
+
+message StatusResponse {
+  string request_id = 1;
+  string snapshot_id = 2;
+  string backend = 3;
+  // pending | running | ready | failed
+  string state = 4;
+  string message = 5;
+  bool remote_ready = 6;
+}

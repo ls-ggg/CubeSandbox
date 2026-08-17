@@ -2760,6 +2760,7 @@ type RunCubeSandboxRequest struct {
 	Namespace string `protobuf:"bytes,15,opt,name=namespace,proto3" json:"namespace,omitempty"`
 	// Egress network policy for the sandbox template/runtime.
 	CubeNetworkConfig *CubeNetworkConfig `protobuf:"bytes,16,opt,name=cube_network_config,json=cubeNetworkConfig,proto3,oneof" json:"cube_network_config,omitempty"`
+	Backend           string             `protobuf:"bytes,17,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -2869,6 +2870,13 @@ func (x *RunCubeSandboxRequest) GetCubeNetworkConfig() *CubeNetworkConfig {
 		return x.CubeNetworkConfig
 	}
 	return nil
+}
+
+func (x *RunCubeSandboxRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
 }
 
 type RunCubeSandboxResponse struct {
@@ -4372,6 +4380,7 @@ type AppSnapshotRequest struct {
 	CreateRequest *RunCubeSandboxRequest `protobuf:"bytes,1,opt,name=create_request,json=createRequest,proto3" json:"create_request,omitempty"`
 	// Custom snapshot directory path. If empty, uses default path.
 	SnapshotDir   string `protobuf:"bytes,2,opt,name=snapshot_dir,json=snapshotDir,proto3" json:"snapshot_dir,omitempty"`
+	Backend       string `protobuf:"bytes,3,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4416,6 +4425,13 @@ func (x *AppSnapshotRequest) GetCreateRequest() *RunCubeSandboxRequest {
 func (x *AppSnapshotRequest) GetSnapshotDir() string {
 	if x != nil {
 		return x.SnapshotDir
+	}
+	return ""
+}
+
+func (x *AppSnapshotRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
 	}
 	return ""
 }
@@ -4602,6 +4618,7 @@ type CommitSandboxRequest struct {
 	TemplateID string `protobuf:"bytes,3,opt,name=templateID,proto3" json:"templateID,omitempty"`
 	// Custom snapshot directory path. If empty, uses default path.
 	SnapshotDir   string `protobuf:"bytes,4,opt,name=snapshot_dir,json=snapshotDir,proto3" json:"snapshot_dir,omitempty"`
+	Backend       string `protobuf:"bytes,5,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4660,6 +4677,13 @@ func (x *CommitSandboxRequest) GetTemplateID() string {
 func (x *CommitSandboxRequest) GetSnapshotDir() string {
 	if x != nil {
 		return x.SnapshotDir
+	}
+	return ""
+}
+
+func (x *CommitSandboxRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
 	}
 	return ""
 }
@@ -4875,6 +4899,7 @@ type RollbackSandboxRequest struct {
 	NewGen uint32 `protobuf:"varint,7,opt,name=new_gen,json=newGen,proto3" json:"new_gen,omitempty"`
 	// Minimum rootfs size after deriving the new generation.
 	DesiredSize   uint64 `protobuf:"varint,8,opt,name=desired_size,json=desiredSize,proto3" json:"desired_size,omitempty"`
+	Backend       string `protobuf:"bytes,9,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4963,6 +4988,13 @@ func (x *RollbackSandboxRequest) GetDesiredSize() uint64 {
 		return x.DesiredSize
 	}
 	return 0
+}
+
+func (x *RollbackSandboxRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
 }
 
 type RollbackSandboxResponse struct {
@@ -5179,6 +5211,7 @@ type CleanupTemplateRequest struct {
 	// cubelet derives objects from local catalog; legacy masters may still
 	// populate this for backward compatibility but new masters MUST send empty.
 	Objects       []*CowObjectRef `protobuf:"bytes,4,rep,name=objects,proto3" json:"objects,omitempty"`
+	Backend       string          `protobuf:"bytes,5,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5239,6 +5272,13 @@ func (x *CleanupTemplateRequest) GetObjects() []*CowObjectRef {
 		return x.Objects
 	}
 	return nil
+}
+
+func (x *CleanupTemplateRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
 }
 
 type CleanupTemplateResponse struct {
@@ -5324,6 +5364,7 @@ type ListSandboxSnapshotsRequest struct {
 	Objects []*CowObjectRef `protobuf:"bytes,3,rep,name=objects,proto3" json:"objects,omitempty"`
 	// Snapshot metadata directory that must remain restorable.
 	MetaDir       string `protobuf:"bytes,4,opt,name=meta_dir,json=metaDir,proto3" json:"meta_dir,omitempty"`
+	Backend       string `protobuf:"bytes,5,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5382,6 +5423,13 @@ func (x *ListSandboxSnapshotsRequest) GetObjects() []*CowObjectRef {
 func (x *ListSandboxSnapshotsRequest) GetMetaDir() string {
 	if x != nil {
 		return x.MetaDir
+	}
+	return ""
+}
+
+func (x *ListSandboxSnapshotsRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
 	}
 	return ""
 }
@@ -5597,6 +5645,7 @@ type ListLocalSnapshotsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
 	RequestID     string `protobuf:"bytes,1,opt,name=requestID,proto3" json:"requestID,omitempty"`
+	Backend       string `protobuf:"bytes,2,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5638,6 +5687,13 @@ func (x *ListLocalSnapshotsRequest) GetRequestID() string {
 	return ""
 }
 
+func (x *ListLocalSnapshotsRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
 type LocalSnapshotInfo struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Logical snapshot ID.
@@ -5670,6 +5726,7 @@ type LocalSnapshotInfo struct {
 	// Catalog entry kind: "template" (AppSnapshot) or "runtime_snapshot"
 	// (CommitSandbox). Empty for pre-v4 legacy entries.
 	Kind          string `protobuf:"bytes,14,opt,name=kind,proto3" json:"kind,omitempty"`
+	Backend       string `protobuf:"bytes,15,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5802,6 +5859,13 @@ func (x *LocalSnapshotInfo) GetKind() string {
 	return ""
 }
 
+func (x *LocalSnapshotInfo) GetBackend() string {
+	if x != nil {
+		return x.Backend
+	}
+	return ""
+}
+
 type ListLocalSnapshotsResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
@@ -5871,6 +5935,7 @@ type GetLocalSnapshotRequest struct {
 	RequestID string `protobuf:"bytes,1,opt,name=requestID,proto3" json:"requestID,omitempty"`
 	// Logical snapshot ID to look up.
 	SnapshotID    string `protobuf:"bytes,2,opt,name=snapshotID,proto3" json:"snapshotID,omitempty"`
+	Backend       string `protobuf:"bytes,3,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5915,6 +5980,13 @@ func (x *GetLocalSnapshotRequest) GetRequestID() string {
 func (x *GetLocalSnapshotRequest) GetSnapshotID() string {
 	if x != nil {
 		return x.SnapshotID
+	}
+	return ""
+}
+
+func (x *GetLocalSnapshotRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
 	}
 	return ""
 }
@@ -5986,6 +6058,7 @@ type GetStorageMetricsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// requestID reqID
 	RequestID     string `protobuf:"bytes,1,opt,name=requestID,proto3" json:"requestID,omitempty"`
+	Backend       string `protobuf:"bytes,2,opt,name=backend,proto3" json:"backend,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6023,6 +6096,13 @@ func (*GetStorageMetricsRequest) Descriptor() ([]byte, []int) {
 func (x *GetStorageMetricsRequest) GetRequestID() string {
 	if x != nil {
 		return x.RequestID
+	}
+	return ""
+}
+
+func (x *GetStorageMetricsRequest) GetBackend() string {
+	if x != nil {
+		return x.Backend
 	}
 	return ""
 }

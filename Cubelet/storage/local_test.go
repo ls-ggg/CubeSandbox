@@ -804,7 +804,7 @@ func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 	cfg.StorageBackend = "cubecow"
 	// cubelet derives reflink root_dir from data_path, so put data_path
 	// somewhere we can also pre-seed stale state in.
-	rootDir := filepath.Join(cfg.DataPath, "cubecow-reflink")
+	rootDir := defaultReflinkAutoRootDir(cfg.DataPath)
 
 	s := &local{config: cfg, cowEngine: &cubecow.Engine{}}
 	require.NoError(t, os.MkdirAll(cfg.RootPath, 0o755))
@@ -1983,7 +1983,14 @@ func TestPrepareCowInlineConfigStampsBackendDefaults(t *testing.T) {
 	require.NoError(t, cfg.PrepareCowInlineConfig())
 	assert.Equal(t, cowBackendReflink, cfg.Cow.Backend.Kind)
 	require.NotNil(t, cfg.Cow.Backend.Reflink.RootDir)
-	assert.Equal(t, "/var/lib/cubelet/cubecow-reflink", *cfg.Cow.Backend.Reflink.RootDir)
+	assert.Equal(t, "/var/lib/cubelet/xfs/objects", *cfg.Cow.Backend.Reflink.RootDir)
+}
+
+func TestDefaultReflinkAutoRootDirKeepsLegacyPool(t *testing.T) {
+	work := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(work, "cubecow-reflink", "volumes"), 0o755))
+	got := defaultReflinkAutoRootDir(work)
+	assert.Equal(t, filepath.Join(work, "cubecow-reflink"), got)
 }
 
 func uint32Ptr(v uint32) *uint32 {

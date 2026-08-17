@@ -100,6 +100,16 @@ func containerConfigForPause(c *cubeboxstore.Container) *cubebox.ContainerConfig
 	return cloned
 }
 
+func pauseSpecDir(entry *storage.SnapshotCatalogEntry) string {
+	if entry == nil {
+		return ""
+	}
+	if d := strings.TrimSpace(entry.MetaDir); d != "" {
+		return d
+	}
+	return strings.TrimSpace(entry.SnapshotPath)
+}
+
 func writePauseSandboxSpec(snapshotPath string, runReq *cubebox.RunCubeSandboxRequest) error {
 	if runReq == nil {
 		return fmt.Errorf("nil sandbox_spec")
@@ -144,14 +154,18 @@ func expandPauseSnapshotPackage(req *cubebox.RunCubeSandboxRequest) error {
 	if err := pathutil.ValidateSafeID(snapID); err != nil {
 		return fmt.Errorf("invalid pause snapshot id: %w", err)
 	}
-	entry, err := storage.GetLocalSnapshot(context.Background(), snapID)
+	backend, berr := storageBackendFromAnnotations(req.GetAnnotations())
+	if berr != nil {
+		return fmt.Errorf("pause snapshot backend: %w", berr)
+	}
+	entry, err := storage.GetLocalSnapshotFor(context.Background(), backend, snapID)
 	if err != nil {
 		return fmt.Errorf("load pause snapshot catalog %s: %w", snapID, err)
 	}
 	if !strings.EqualFold(strings.TrimSpace(entry.Kind), storage.CatalogKindPauseSnapshot) {
 		return fmt.Errorf("snapshot %s kind=%q is not pause_snapshot", snapID, entry.Kind)
 	}
-	packed, err := loadPauseSandboxSpec(entry.SnapshotPath)
+	packed, err := loadPauseSandboxSpec(pauseSpecDir(entry))
 	if err != nil {
 		return fmt.Errorf("load pause sandbox_spec: %w", err)
 	}

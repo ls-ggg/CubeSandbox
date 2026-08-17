@@ -300,3 +300,26 @@ func newLocalRunTemplateForPath(templateID, snapshotPath string) *templatetypes.
 		},
 	}
 }
+
+func TestRecoveredMetadataHome(t *testing.T) {
+	baseDir := t.TempDir()
+	home := filepath.Join(baseDir, "tpl-s3")
+	metaDir := filepath.Join(home, "metadata")
+	configPath := filepath.Join(metaDir, "snapshot", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	template := recoveredS3LocalTemplate(home, metaDir)
+	if template == nil {
+		t.Fatal("expected recovered template")
+	}
+	if template.TemplateID != "tpl-s3" {
+		t.Fatalf("id=%q", template.TemplateID)
+	}
+	if template.Snapshot.Snapshot.Path != metaDir {
+		t.Fatalf("path=%q", template.Snapshot.Snapshot.Path)
+	}
+}

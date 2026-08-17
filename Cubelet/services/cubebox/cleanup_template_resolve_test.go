@@ -34,7 +34,7 @@ func TestResolveCleanupRefsPrefersCallerObjects(t *testing.T) {
 		{Name: "explicit-rootfs", Kind: "snapshot", Role: "rootfs"},
 		{Name: "explicit-mem", Kind: "volume", Role: "memory"},
 	}
-	refs, snapPath, err := resolveCleanupRefs(context.Background(), templateID, objs, "/legacy/path")
+	refs, snapPath, err := resolveCleanupRefs(context.Background(), "", templateID, objs, "/legacy/path")
 	require.NoError(t, err)
 	require.Len(t, refs, 2)
 	assert.Equal(t, "explicit-rootfs", refs[0].Name)
@@ -59,7 +59,7 @@ func TestResolveCleanupRefsUsesCatalogWhenObjectsEmpty(t *testing.T) {
 		Kind:            storage.CatalogKindTemplate,
 	})
 
-	refs, snapPath, err := resolveCleanupRefs(context.Background(), templateID, nil, "")
+	refs, snapPath, err := resolveCleanupRefs(context.Background(), "", templateID, nil, "")
 	require.NoError(t, err)
 	require.Len(t, refs, 3)
 	assert.Equal(t, "cat-rootfs", refs[0].Name)
@@ -82,14 +82,14 @@ func TestResolveCleanupRefsCatalogPathOverridesCallerWhenBothPresent(t *testing.
 		MemoryVol:    "m",
 	})
 
-	_, snapPath, err := resolveCleanupRefs(context.Background(), templateID, nil, "/legacy/should/lose")
+	_, snapPath, err := resolveCleanupRefs(context.Background(), "", templateID, nil, "/legacy/should/lose")
 	require.NoError(t, err)
 	assert.Equal(t, snapDir, snapPath)
 }
 
 func TestResolveCleanupRefsFallsBackToDeterministicOnCatalogMiss(t *testing.T) {
 	templateID := "tpl-resolve-miss"
-	refs, snapPath, err := resolveCleanupRefs(context.Background(), templateID, nil, "/legacy/fallback")
+	refs, snapPath, err := resolveCleanupRefs(context.Background(), "", templateID, nil, "/legacy/fallback")
 	require.NoError(t, err)
 	require.Len(t, refs, 3)
 	assert.Equal(t, "tpl-"+templateID+"-rootfs", refs[0].Name)
@@ -114,7 +114,7 @@ func TestResolveCleanupRefsCatalogWithoutBuildRootfsStillCleansFromCatalog(t *te
 		Kind:         storage.CatalogKindRuntimeSnapshot,
 	})
 
-	refs, _, err := resolveCleanupRefs(context.Background(), templateID, nil, "")
+	refs, _, err := resolveCleanupRefs(context.Background(), "", templateID, nil, "")
 	require.NoError(t, err)
 	require.Len(t, refs, 2)
 	assert.Equal(t, "rt-rootfs", refs[0].Name)

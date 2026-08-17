@@ -222,3 +222,37 @@ func TestSnapshotRestoreContainerIDFallsBackToSnapshotID(t *testing.T) {
 		t.Fatalf("snapshotRestoreContainerID=%q, want %q", got, "snap-123_0")
 	}
 }
+
+func TestResolveSnapshotPathsAcceptsMetadataHome(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	meta := filepath.Join(home, "metadata")
+	if err := os.MkdirAll(filepath.Join(meta, "snapshot"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(meta, "snapshot", "config.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(meta, "metadata.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	p := &cubeboxInstancePlugin{}
+	req := &cubebox.RunCubeSandboxRequest{
+		Containers: []*cubebox.ContainerConfig{{
+			Resources: &cubebox.Resource{Cpu: "2000m", Mem: "2000Mi"},
+		}},
+	}
+	paths, err := p.resolveSnapshotPaths("snap-1", meta, req)
+	if err != nil {
+		t.Fatalf("resolveSnapshotPaths: %v", err)
+	}
+	if paths.Spec != meta {
+		t.Fatalf("Spec=%q want metadata home %q", paths.Spec, meta)
+	}
+	if paths.Base != home {
+		t.Fatalf("Base=%q want snapshot home %q", paths.Base, home)
+	}
+	if paths.ResDir != "2C2000M" {
+		t.Fatalf("ResDir=%q", paths.ResDir)
+	}
+}

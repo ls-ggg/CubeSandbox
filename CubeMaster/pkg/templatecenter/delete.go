@@ -54,6 +54,7 @@ type templateCleanupLocator struct {
 
 type templateCleanupTargets struct {
 	Definition   *models.TemplateDefinition
+	Snapshot     *models.SnapshotRecord
 	Replicas     []models.TemplateReplica
 	Jobs         []models.TemplateImageJob
 	Locators     []templateCleanupLocator
@@ -140,6 +141,19 @@ func discoverTemplateCleanupTargets(ctx context.Context, templateID, instanceTyp
 		return nil, err
 	}
 
+	if rec, snapErr := getSnapshotRecord(ctx, templateID); snapErr == nil && rec != nil {
+		targets.Snapshot = rec
+		if instanceType == "" {
+			instanceType = rec.InstanceType
+		}
+		targets.addLocator(templateCleanupLocator{
+			NodeID: rec.OriginNodeID,
+			NodeIP: rec.OriginNodeIP,
+		})
+	} else if snapErr != nil && !errors.Is(snapErr, ErrSnapshotNotFound) {
+		return nil, snapErr
+	}
+
 	replicas, err := ListReplicas(ctx, templateID)
 	if err != nil {
 		return nil, err
@@ -194,7 +208,7 @@ func (t *templateCleanupTargets) addLocator(locator templateCleanupLocator) {
 }
 
 func (t *templateCleanupTargets) hasCleanupState() bool {
-	return t != nil && (t.Definition != nil || len(t.Replicas) > 0 || len(t.Jobs) > 0)
+	return t != nil && (t.Definition != nil || t.Snapshot != nil || len(t.Replicas) > 0 || len(t.Jobs) > 0)
 }
 
 func (t *templateCleanupTargets) hasActiveJob() bool {
@@ -237,7 +251,13 @@ func (t *templateCleanupTargets) requiresCleanupLocator() bool {
 }
 
 func (t *templateCleanupTargets) shouldCheckInUse() bool {
-	if t == nil || t.Definition == nil {
+	if t == nil {
+		return false
+	}
+	if t.Snapshot != nil {
+		return !strings.EqualFold(t.Snapshot.Status, StatusFailed)
+	}
+	if t.Definition == nil {
 		return false
 	}
 	return !strings.EqualFold(t.Definition.Status, StatusFailed)
@@ -251,6 +271,10 @@ func cleanupTemplateMetadata(ctx context.Context, templateID string) error {
 	}
 	if err := store.db.WithContext(ctx).Unscoped().Table(constants.TemplateDefinitionTableName).
 		Where("template_id = ?", templateID).Delete(&models.TemplateDefinition{}).Error; err != nil {
+		cleanupErr = errors.Join(cleanupErr, err)
+	}
+	if err := store.db.WithContext(ctx).Unscoped().Table(constants.SnapshotTableName).
+		Where("snapshot_id = ?", templateID).Delete(&models.SnapshotRecord{}).Error; err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
 	return cleanupErr

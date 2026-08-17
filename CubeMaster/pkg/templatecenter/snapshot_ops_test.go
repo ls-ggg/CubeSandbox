@@ -73,11 +73,11 @@ func TestSubmitSandboxSnapshotReusesExistingRequest(t *testing.T) {
 			Status:     JobStatusReady,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 
-	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap")
+	info, err := SubmitSandboxSnapshot(context.Background(), "req-existing", "sb-1", "node-1", "10.0.0.1", "snap", "")
 	if err != nil {
 		t.Fatalf("SubmitSandboxSnapshot returned error: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 			Operation: JobOperationSnapshotCreate,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
@@ -134,7 +134,7 @@ func TestSubmitSandboxSnapshotResumesPendingExistingRequest(t *testing.T) {
 		return nil
 	})
 
-	info, err := SubmitSandboxSnapshot(context.Background(), "req-pending", "sb-1", "node-1", "10.0.0.1", "snap")
+	info, err := SubmitSandboxSnapshot(context.Background(), "req-pending", "sb-1", "node-1", "10.0.0.1", "snap", "")
 	if err != nil {
 		t.Fatalf("expected pending existing request to resume, got %v", err)
 	}
@@ -168,7 +168,7 @@ func TestSubmitSandboxSnapshotReturnsStoredFailureForExistingRequest(t *testing.
 			Operation: JobOperationSnapshotCreate,
 		}, nil
 	})
-	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
+	patches.ApplyFunc(snapshotCreateRequestMatches, func(_, _, _, _, _, _, _ string, _ *sandboxtypes.CreateCubeSandboxReq) bool {
 		return true
 	})
 	patches.ApplyFunc(GetTemplateImageJobInfo, func(ctx context.Context, jobID string) (*sandboxtypes.TemplateImageJobInfo, error) {
@@ -181,7 +181,7 @@ func TestSubmitSandboxSnapshotReturnsStoredFailureForExistingRequest(t *testing.
 		}, nil
 	})
 
-	_, err := SubmitSandboxSnapshot(context.Background(), "req-failed", "sb-1", "node-1", "10.0.0.1", "snap")
+	_, err := SubmitSandboxSnapshot(context.Background(), "req-failed", "sb-1", "node-1", "10.0.0.1", "snap", "")
 	if err == nil {
 		t.Fatal("expected stored failure for existing request")
 	}
@@ -399,7 +399,7 @@ func TestRunSnapshotCreateJobWritesThinReplica(t *testing.T) {
 		upserted = replica
 		return nil
 	})
-	patches.ApplyFunc(updateDefinitionFields, func(ctx context.Context, templateID string, fields map[string]any) error {
+	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, templateID string, fields map[string]any) error {
 		if status, ok := fields["status"].(string); ok && status == StatusReady {
 			readyTemplate = true
 		}
@@ -548,10 +548,9 @@ func TestDeleteSnapshotBlocksWhenRuntimeRefsExist(t *testing.T) {
 	patches.ApplyFunc(getTemplateImageJobByRequestID, func(ctx context.Context, requestID string) (*models.TemplateImageJob, error) {
 		return nil, gorm.ErrRecordNotFound
 	})
-	patches.ApplyFunc(GetDefinition, func(ctx context.Context, templateID string) (*models.TemplateDefinition, error) {
-		return &models.TemplateDefinition{
-			TemplateID: templateID,
-			Kind:       TemplateKindSnapshot,
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{
+			SnapshotID: snapshotID,
 			Status:     StatusReady,
 		}, nil
 	})

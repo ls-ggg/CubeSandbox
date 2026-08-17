@@ -25,6 +25,7 @@ import (
 	volpkg "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume"
 	volbinary "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/binary"
 	volrpc "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume/rpc"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -191,19 +192,19 @@ func (c *Config) cowReflinkRootDir() (string, error) {
 	return defaultReflinkAutoRootDir(c.DataPath), nil
 }
 
-// defaultReflinkAutoRootDir picks `<data_path-base>/cubecow-reflink/`
-// when no explicit `root_dir` is provided. It strips the
-// `<plugin>.<id>` storage suffix from `dataPath` so reflink files
-// share the same physical filesystem as the rest of cubelet's
-// persistent state instead of accidentally landing on the OS disk
-// under cubecow's library-level fallback.
+// defaultReflinkAutoRootDir picks the cubecow reflink pool. Existing
+// deployments keep `<work>/cubecow-reflink` when that volumes dir is
+// already present; new installs use `<work>/xfs/objects`.
 func defaultReflinkAutoRootDir(dataPath string) string {
-	storageDir := fmt.Sprintf("%v.%v", constants.InternalPlugin, constants.StorageID)
-	baseDir := filepath.Clean(dataPath)
-	if filepath.Base(baseDir) == storageDir {
-		baseDir = filepath.Dir(baseDir)
+	work := stripStoragePluginDataDir(filepath.Clean(dataPath))
+	if work == "" || work == "." {
+		work = filepath.Join(constants.CubeConfigBasePath, "storage")
 	}
-	return filepath.Join(baseDir, "cubecow-reflink")
+	legacy := filepath.Join(work, "cubecow-reflink")
+	if st, err := os.Stat(filepath.Join(legacy, "volumes")); err == nil && st.IsDir() {
+		return legacy
+	}
+	return filepath.Join(work, cow.BackendXFS, SnapshotObjectsDir)
 }
 
 func (c *Config) cowStartupCommands() []string {
@@ -347,7 +348,9 @@ func init() {
 				return nil, err
 			}
 
-			SetSnapshotCatalogRoots(constants.DefaultSnapshotDir)
+			xfsRoots := append(catalogKindRoots(cow.BackendXFS), constants.DefaultSnapshotDir)
+			SetSnapshotCatalogRootsFor(cow.BackendXFS, xfsRoots...)
+			SetSnapshotCatalogRootsFor(cow.BackendS3, catalogKindRoots(cow.BackendS3)...)
 
 			return localStorage, nil
 		},

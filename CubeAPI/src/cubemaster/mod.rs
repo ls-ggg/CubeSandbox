@@ -1521,6 +1521,8 @@ pub struct CreateSnapshotRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     pub create_request: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 /// Snapshot resource as returned by CubeMaster.
@@ -1542,6 +1544,10 @@ pub struct SnapshotResource {
     pub instance_type: String,
     #[serde(default)]
     pub storage_backend: String,
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default)]
+    pub remote_status: String,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -1670,6 +1676,8 @@ pub struct RollbackRequest {
     pub request_id: String,
     pub snapshot_id: String,
     pub instance_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 /// POST /cube/sandbox/{sandbox_id}/rollback — response.

@@ -402,6 +402,29 @@ func assertHeadSchema(t *testing.T, db *sql.DB) {
 			indexes: []string{"idx_agenthub_snapshot_deleted_at"},
 		},
 		{
+			table: "t_cube_snapshot",
+			columns: []string{
+				"snapshot_id", "origin_sandbox_id", "origin_node_id",
+				"backend", "remote_status", "request_json",
+			},
+			indexes: []string{
+				"uniq_cube_snapshot_id",
+				"idx_cube_snapshot_origin_sandbox",
+				"idx_cube_snapshot_backend",
+			},
+		},
+		{
+			table: "t_cube_pause_snapshot",
+			columns: []string{
+				"snapshot_id", "sandbox_id", "node_id", "node_ip",
+				"backend", "remote_status", "origin_host_facts_json",
+			},
+			indexes: []string{
+				"uniq_pause_snapshot_id",
+				"uniq_pause_sandbox_id",
+			},
+		},
+		{
 			table:   "t_cube_snapshot_runtime_ref",
 			columns: []string{"snapshot_id", "binding_type", "sandbox_gen"},
 		},

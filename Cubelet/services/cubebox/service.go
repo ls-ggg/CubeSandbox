@@ -247,6 +247,14 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
 	}
+	if b := strings.TrimSpace(req.GetBackend()); b != "" {
+		if req.Annotations == nil {
+			req.Annotations = map[string]string{}
+		}
+		if strings.TrimSpace(req.Annotations[constants.MasterAnnotationStorageBackend]) == "" {
+			req.Annotations[constants.MasterAnnotationStorageBackend] = b
+		}
+	}
 	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
 	if sid := resumeFromPauseSandboxID(req); sid != "" {
 		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, sid)
@@ -743,7 +751,8 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 		}
 	}
 	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && pauseSnapToGC != "" {
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC)
+		backend, _ := storageBackendFromAnnotations(req.GetAnnotations())
+		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, backend)
 	}
 	return rsp, nil
 }

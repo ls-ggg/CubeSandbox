@@ -30,3 +30,10 @@ type Syncer interface {
 	// SyncStatus returns the last known sync state. Unknown ids report Pending.
 	SyncStatus(ctx context.Context, snapshotID string) (*SyncStatus, error)
 }
+
+// Activator is the optional capability for opening a snapshot that already
+// exists on this node. Real cross-node ingest will call into CubeCow; the
+// mock only activates local objects and fails when they are missing.
+type Activator interface {
+	Activate(ctx context.Context, snapshotID string) error
+}

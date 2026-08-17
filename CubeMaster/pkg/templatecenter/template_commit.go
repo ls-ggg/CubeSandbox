@@ -226,6 +226,7 @@ func runTemplateCommitJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 		SandboxID:   sandboxID,
 		TemplateID:  templateID,
 		SnapshotDir: createReq.SnapshotDir,
+		Backend:     storageBackendFromCreate(createReq),
 	})
 	commitCancel()
 	if err != nil {

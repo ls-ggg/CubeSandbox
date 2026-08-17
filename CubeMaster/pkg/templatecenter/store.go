@@ -540,6 +540,30 @@ func persistTemplateEnvdVersion(ctx context.Context, templateID, version string)
 	// Serialize the request_json read-modify-write against concurrent template
 	// request reads/writes for the same template to avoid a lost update.
 	return withTemplateWriteLock(templateID, func() error {
+		if rec, err := getSnapshotRecord(ctx, templateID); err == nil && rec != nil {
+			req, err := requestFromSnapshotJSON(rec.RequestJSON)
+			if err != nil {
+				return err
+			}
+			if req.Annotations == nil {
+				req.Annotations = make(map[string]string)
+			}
+			if req.Annotations[constants.CubeAnnotationComponentEnvdVersion] == version {
+				return nil
+			}
+			req.Annotations[constants.CubeAnnotationComponentEnvdVersion] = version
+			payload, err := json.Marshal(req)
+			if err != nil {
+				return err
+			}
+			if err := updateSnapshotFields(ctx, templateID, map[string]any{"request_json": string(payload)}); err != nil {
+				return err
+			}
+			templateDefinitionCache.Delete(templateID)
+			return nil
+		} else if err != nil && !errors.Is(err, ErrSnapshotNotFound) {
+			return err
+		}
 		def, err := GetDefinition(ctx, templateID)
 		if err != nil {
 			return err
@@ -1482,6 +1506,20 @@ func GetTemplateRequest(ctx context.Context, templateID string) (*sandboxtypes.C
 		var req *sandboxtypes.CreateCubeSandboxReq
 		err := withTemplateReadLock(templateID, func() error {
 			dbStart := time.Now()
+			if rec, snapErr := getSnapshotRecord(ctx, templateID); snapErr == nil && rec != nil {
+				reportTemplateMetric(ctx, constants.MySQL, store.dbAddr, constants.ActionTemplateGetDefinition, time.Since(dbStart), 0)
+				parsed, err := requestFromSnapshotJSON(rec.RequestJSON)
+				if err != nil {
+					return err
+				}
+				req = parsed
+				if err = setTemplateRequestCache(templateID, req); err != nil {
+					log.G(ctx).Warnf("set snapshot request cache fail, snapshot=%s err=%v", templateID, err)
+				}
+				return nil
+			} else if snapErr != nil && !errors.Is(snapErr, ErrSnapshotNotFound) {
+				return snapErr
+			}
 			def, err := GetDefinition(ctx, templateID)
 			reportTemplateMetric(ctx, constants.MySQL, store.dbAddr, constants.ActionTemplateGetDefinition, time.Since(dbStart), 0)
 			if err != nil {

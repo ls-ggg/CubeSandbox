@@ -207,6 +207,9 @@ const (
 	// id (same snap-* format as normal Commit snapshots). Cubelet only stores
 	// the local catalog under this id; Kind=pause_snapshot.
 	MasterAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// MasterAnnotationStorageBackend is the CoW backend Master passes on
+	// Pause / Commit (xfs｜s3). Empty means xfs.
+	MasterAnnotationStorageBackend = "cube.master.storage.backend"
 	// MasterAnnotationDesiredSandboxID asks createid to use this sandbox ID
 	// instead of generating a new one (Resume-from-pause / same-ID recreate).
 	MasterAnnotationDesiredSandboxID = "cube.master.desired.sandbox.id"

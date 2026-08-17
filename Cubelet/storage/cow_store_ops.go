@@ -62,6 +62,23 @@ func SnapshotSyncStatus(ctx context.Context, backend, snapshotID string) (*cow.S
 	return syncer.SyncStatus(ctx, snapshotID)
 }
 
+// ActivateSnapshot opens a local snapshot's cubecow objects on the Store
+// for backend. Missing objects fail; there is no mock remote ingest.
+// Does not start a sandbox. Pause Resume then starts on these objects
+// in place; ordinary snapshot Create still clones after activate.
+func ActivateSnapshot(ctx context.Context, backend, snapshotID string) error {
+	activator, err := requireCowActivator(backend)
+	if err != nil {
+		return err
+	}
+	return activator.Activate(ctx, snapshotID)
+}
+
+// RestoreSnapshot is the previous name of [ActivateSnapshot].
+func RestoreSnapshot(ctx context.Context, backend, snapshotID string) error {
+	return ActivateSnapshot(ctx, backend, snapshotID)
+}
+
 func requireCowSyncer(backend string) (cow.Syncer, error) {
 	normalized, err := cow.NormalizeBackend(backend)
 	if err != nil {
@@ -79,6 +96,26 @@ func requireCowSyncer(backend string) (cow.Syncer, error) {
 		return nil, fmt.Errorf("s3 cow store does not implement sync")
 	}
 	return syncer, nil
+}
+
+func requireCowActivator(backend string) (cow.Activator, error) {
+	store, err := requireCowStoreFor(backend)
+	if err != nil {
+		return nil, err
+	}
+	if activator, ok := store.(cow.Activator); ok && activator != nil {
+		return activator, nil
+	}
+	return storeActivator{store: store, backend: backend}, nil
+}
+
+type storeActivator struct {
+	store   cow.Store
+	backend string
+}
+
+func (a storeActivator) Activate(ctx context.Context, snapshotID string) error {
+	return activateStoreObjects(ctx, a.store, a.backend, snapshotID)
 }
 
 // StoreFor returns the live XFS or S3 [cow.Store] for backend (request `type`).
@@ -108,13 +145,22 @@ func StoreFor(backend string) (cow.Store, error) {
 	}
 }
 
-// GetSandboxRootfs resolves the live sandbox rootfs CoW object.
+// GetSandboxRootfs resolves the live sandbox rootfs CoW object on the default Store.
 func GetSandboxRootfs(ctx context.Context, sandboxID, preferredVolumeName string) (*CowSnapshotObject, error) {
+	return GetSandboxRootfsFor(ctx, cow.BackendXFS, sandboxID, preferredVolumeName)
+}
+
+// GetSandboxRootfsFor is [GetSandboxRootfs] on the Store selected by backend.
+func GetSandboxRootfsFor(ctx context.Context, backend, sandboxID, preferredVolumeName string) (*CowSnapshotObject, error) {
 	if localStorage == nil {
 		return nil, fmt.Errorf("storage is not initialized")
 	}
 	if !localStorage.useCowStorage() {
 		return nil, fmt.Errorf("storage backend is not cubecow")
+	}
+	store, err := requireCowStoreFor(backend)
+	if err != nil {
+		return nil, err
 	}
 	info, err := localStorage.readBackendFileInfo(ctx, sandboxID)
 	if err != nil {
@@ -124,7 +170,7 @@ func GetSandboxRootfs(ctx context.Context, sandboxID, preferredVolumeName string
 	if err != nil {
 		return nil, err
 	}
-	return backendFileInfoToSnapshotObject(ctx, localStorage.cowManager, rootfs)
+	return backendFileInfoToSnapshotObject(ctx, store, rootfs)
 }
 
 // CommitRootfs commits source rootfs into tpl-<id>-rootfs on the default (XFS) Store.
@@ -251,9 +297,14 @@ func ResolveObjectPathFor(ctx context.Context, backend, name, kind string) (stri
 	return store.ResolveDevPath(ctx, name, normalizedKind)
 }
 
-// CleanupObjects best-effort deletes the given CoW object refs.
+// CleanupObjects best-effort deletes the given CoW object refs on the default Store.
 func CleanupObjects(ctx context.Context, refs []CowObjectRef) error {
-	store, err := requireCowStore()
+	return CleanupObjectsFor(ctx, cow.BackendXFS, refs)
+}
+
+// CleanupObjectsFor is [CleanupObjects] on the Store selected by backend.
+func CleanupObjectsFor(ctx context.Context, backend string, refs []CowObjectRef) error {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return err
 	}
@@ -275,9 +326,14 @@ func CleanupObjects(ctx context.Context, refs []CowObjectRef) error {
 	return cleanupErr
 }
 
-// InspectObjects reports existence/device path for CoW object refs.
+// InspectObjects reports existence/device path for CoW object refs on the default Store.
 func InspectObjects(ctx context.Context, refs []CowObjectRef) ([]CowObjectStatus, error) {
-	store, err := requireCowStore()
+	return InspectObjectsFor(ctx, cow.BackendXFS, refs)
+}
+
+// InspectObjectsFor is [InspectObjects] on the Store selected by backend.
+func InspectObjectsFor(ctx context.Context, backend string, refs []CowObjectRef) ([]CowObjectStatus, error) {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return nil, err
 	}
@@ -317,9 +373,14 @@ func InspectObjects(ctx context.Context, refs []CowObjectRef) ([]CowObjectStatus
 	return statuses, nil
 }
 
-// ObjectMetrics returns backend metrics from the active [cow.Store].
+// ObjectMetrics returns metrics from the default (XFS) [cow.Store].
 func ObjectMetrics(ctx context.Context) (map[string]uint64, error) {
-	store, err := requireCowStore()
+	return ObjectMetricsFor(ctx, cow.BackendXFS)
+}
+
+// ObjectMetricsFor returns metrics from the Store selected by backend.
+func ObjectMetricsFor(ctx context.Context, backend string) (map[string]uint64, error) {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return nil, err
 	}
@@ -335,9 +396,14 @@ func ObjectMetrics(ctx context.Context) (map[string]uint64, error) {
 	return metrics, nil
 }
 
-// ResolveRollbackRefs resolves rootfs/memory objects for rollback.
+// ResolveRollbackRefs resolves rootfs/memory objects for rollback on the default Store.
 func ResolveRollbackRefs(ctx context.Context, rootfsVol, memoryVol, memoryKind string) (*CowRollbackSnapshotRefs, error) {
-	store, err := requireCowStore()
+	return ResolveRollbackRefsFor(ctx, cow.BackendXFS, rootfsVol, memoryVol, memoryKind)
+}
+
+// ResolveRollbackRefsFor is [ResolveRollbackRefs] on the Store selected by backend.
+func ResolveRollbackRefsFor(ctx context.Context, backend, rootfsVol, memoryVol, memoryKind string) (*CowRollbackSnapshotRefs, error) {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return nil, err
 	}
@@ -356,9 +422,14 @@ func ResolveRollbackRefs(ctx context.Context, rootfsVol, memoryVol, memoryKind s
 	return &CowRollbackSnapshotRefs{Rootfs: rootfs, Memory: memory}, nil
 }
 
-// DeriveRollbackRootfs creates sb-<id>-rootfs-genN from a snapshot rootfs.
+// DeriveRollbackRootfs creates sb-<id>-rootfs-genN from a snapshot rootfs on the default Store.
 func DeriveRollbackRootfs(ctx context.Context, sandboxID, snapshotRootfsVol string, newGen uint32, desiredSizeBytes uint64) (*CowSnapshotObject, error) {
-	store, err := requireCowStore()
+	return DeriveRollbackRootfsFor(ctx, cow.BackendXFS, sandboxID, snapshotRootfsVol, newGen, desiredSizeBytes)
+}
+
+// DeriveRollbackRootfsFor is [DeriveRollbackRootfs] on the Store selected by backend.
+func DeriveRollbackRootfsFor(ctx context.Context, backend, sandboxID, snapshotRootfsVol string, newGen uint32, desiredSizeBytes uint64) (*CowSnapshotObject, error) {
+	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return nil, err
 	}

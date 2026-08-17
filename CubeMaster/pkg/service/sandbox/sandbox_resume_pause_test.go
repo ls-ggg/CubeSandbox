@@ -10,6 +10,8 @@ import (
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/require"
 	dbmodels "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 )
 
 func TestValidatePauseResumeVolumesEmptyOK(t *testing.T) {
@@ -37,4 +39,31 @@ func TestValidatePauseResumeVolumesPresent(t *testing.T) {
 	defer patches.Reset()
 
 	require.NoError(t, validatePauseResumeVolumes([]string{"vol-ok", "  vol-ok2  "}))
+}
+
+func TestPauseResumePlacementInputPinsHostMount(t *testing.T) {
+	t.Parallel()
+	rec := &pausesnap.Record{
+		SnapshotID:   "snap-1",
+		Backend:      "s3",
+		RemoteStatus: "ready",
+		NodeID:       "node-a",
+		NodeIP:       "10.0.0.1",
+	}
+	got := pauseResumePlacementInput(rec, "cubebox", &types.CreateCubeSandboxReq{
+		Annotations: map[string]string{
+			AnnotationHostDirMount: `[{"hostPath":"/data/shared/a","mountPath":"/mnt"}]`,
+		},
+	})
+	if !got.PinToOrigin {
+		t.Fatal("host-mount spec must pin resume to origin")
+	}
+	plain := pauseResumePlacementInput(rec, "cubebox", &types.CreateCubeSandboxReq{})
+	if plain.PinToOrigin {
+		t.Fatal("spec without host-mount must not pin")
+	}
+	missing := pauseResumePlacementInput(rec, "cubebox", nil)
+	if missing.PinToOrigin {
+		t.Fatal("missing spec must not pin")
+	}
 }

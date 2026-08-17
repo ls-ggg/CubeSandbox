@@ -1,0 +1,46 @@
+// Copyright (c) 2026 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+package constants
+
+import (
+	"fmt"
+	"strings"
+)
+
+const (
+	// SnapshotBackendXFS is the default local CoW backend.
+	SnapshotBackendXFS = "xfs"
+	// SnapshotBackendS3 is the cluster-shared S3 backend.
+	SnapshotBackendS3 = "s3"
+
+	// RemoteStatus* are S3 sync states stored on snapshot / pause-snapshot
+	// rows. Empty on xfs (remote_status is S3-only).
+	RemoteStatusPending = "pending"
+	RemoteStatusRunning = "running"
+	RemoteStatusReady   = "ready"
+	RemoteStatusFailed  = "failed"
+)
+
+// NormalizeSnapshotBackend maps create/pause backend input onto xfs | s3.
+// Empty and historical cubecow aliases become xfs.
+func NormalizeSnapshotBackend(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", SnapshotBackendXFS, "cow", "cubecow", "reflink", "xfscow":
+		return SnapshotBackendXFS, nil
+	case SnapshotBackendS3:
+		return SnapshotBackendS3, nil
+	default:
+		return "", fmt.Errorf("unsupported backend %q (want %q or %q)", raw, SnapshotBackendXFS, SnapshotBackendS3)
+	}
+}
+
+// SnapshotRemoteStatus returns the default remote_status for a normalized
+// backend. S3 starts pending; xfs leaves the column empty.
+func SnapshotRemoteStatus(backend string) string {
+	if strings.EqualFold(strings.TrimSpace(backend), SnapshotBackendS3) {
+		return RemoteStatusPending
+	}
+	return ""
+}

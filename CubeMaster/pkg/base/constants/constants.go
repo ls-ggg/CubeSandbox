@@ -77,6 +77,13 @@ const (
 	// Master (same snap-* format as normal snapshots). DB Kind=pause_snapshot;
 	// Cubelet only keeps the local catalog under that id.
 	CubeAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// CubeAnnotationStorageBackend is the CoW backend Master passes to Cubelet
+	// on Pause / Commit (xfs｜s3). Empty means xfs.
+	CubeAnnotationStorageBackend = "cube.master.storage.backend"
+	// CubeAnnotationSnapshotAllowNonLocal lets the scheduler pick a node that
+	// does not already hold a local replica. Set on S3 remote_ready cross-node
+	// from-snapshot Create. Value is the literal "true".
+	CubeAnnotationSnapshotAllowNonLocal = "cube.master.snapshot.allow_nonlocal"
 	// CubeAnnotationPauseKeepTombstone is used by Cubelet's in-process Destroy
 	// after PauseToSnapshot (Master no longer issues a separate Destroy RPC).
 	CubeAnnotationPauseKeepTombstone = "cube.pause.keep_tombstone"
@@ -210,6 +217,10 @@ const (
 	SnapshotRuntimeRefTableName    = "t_cube_snapshot_runtime_ref"
 	SnapshotRuntimeActiveTableName = "t_cube_snapshot_runtime_active"
 	SandboxSpecTableName           = "t_cube_sandbox_spec"
+	// SnapshotTableName holds user Commit snapshots (independent of template
+	// definitions). Pause bindings live in PauseSnapshotTableName.
+	SnapshotTableName      = "t_cube_snapshot"
+	PauseSnapshotTableName = "t_cube_pause_snapshot"
 	// ArtifactNodePlacementTableName records on which nodes an ext4 rootfs
 	// artifact is physically present, independent of replica lifecycle, so the
 	// last-owner-cleanup / GC paths can enumerate every node that ever held an

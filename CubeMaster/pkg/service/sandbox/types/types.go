@@ -65,6 +65,9 @@ type CreateCubeSandboxReq struct {
 	DistributionScope []string          `json:"distribution_scope,omitempty"`
 	InstanceType      string            `json:"instance_type,omitempty"`
 	NetworkType       string            `json:"network_type,omitempty"`
+	// Backend is the CoW store (xfs｜s3) for snapshot restore / create-from-snap.
+	// Empty means xfs.
+	Backend string `json:"backend,omitempty"`
 
 	RuntimeHandler string `json:"runtime_handler,omitempty"`
 	Namespace      string `json:"namespace,omitempty"`
@@ -806,6 +809,9 @@ type UpdateRequest struct {
 	SandboxID    string `json:"sandbox_id"`
 	InstanceType string `json:"instance_type"`
 	Action       string `json:"action"`
+	// Backend is the CoW store (xfs｜s3) forwarded to Cubelet as
+	// cube.master.storage.backend. Empty means xfs.
+	Backend string `json:"backend,omitempty"`
 }
 
 // SetTimeoutRequest is the wire shape for POST /cube/sandbox/timeout.

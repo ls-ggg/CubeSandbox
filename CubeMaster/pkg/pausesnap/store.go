@@ -3,7 +3,7 @@
 //
 
 // Package pausesnap persists the thin pause binding on Master: sandboxID ↔
-// snapshotID (Kind=pause_snapshot) plus source node. Recreate metadata
+// snapshotID ↔ node, plus backend / remote_status. Recreate metadata
 // (sandbox_spec.json) is packed with the snapshot on Cubelet for same-/cross-
 // node Resume; it is not stored in Master DB.
 package pausesnap
@@ -20,27 +20,21 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/db/models"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/nodemeta"
 	"gorm.io/gorm"
 )
 
-// pauseRequestJSON is stored in TemplateDefinition.RequestJSON for pause snaps.
-type pauseRequestJSON struct {
-	PluginVolumeIDs []string `json:"plugin_volume_ids,omitempty"`
-}
-
 const (
-	// KindPauseSnapshot is TemplateDefinition.Kind for Pause-produced snaps.
-	// Normal Commit snaps use templatecenter.TemplateKindSnapshot ("snapshot").
+	// KindPauseSnapshot is the logical kind returned by GetTemplateKind for
+	// pause bindings. Pause rows no longer live in t_cube_template_definition.
 	KindPauseSnapshot = "pause_snapshot"
 	statusReady       = "READY"
 	statusCreating    = "CREATING"
 	// StatusFailed is a terminal Pause failure. Binding and sandbox proxy are
 	// kept so the user can see the failure; Resume is rejected until Delete.
-	StatusFailed      = "FAILED"
-	statusFailed      = StatusFailed
-	replicaReady      = "READY"
-	replicaPhaseReady = "READY"
-	snapshotIDPrefix  = "snap-"
+	StatusFailed     = "FAILED"
+	statusFailed     = StatusFailed
+	snapshotIDPrefix = "snap-"
 )
 
 var (
@@ -71,19 +65,21 @@ func GenerateSnapshotID() string {
 
 // Record is the Master-side pause snapshot binding.
 type Record struct {
-	SandboxID       string
-	SnapshotID      string
-	NodeID          string
-	NodeIP          string
-	Status          string
-	LastError       string
-	PluginVolumeIDs []string
+	SandboxID           string
+	SnapshotID          string
+	NodeID              string
+	NodeIP              string
+	InstanceType        string
+	Status              string
+	LastError           string
+	PluginVolumeIDs     []string
+	Backend             string
+	RemoteStatus        string
+	OriginHostFactsJSON string
 }
 
-// Begin allocates snapshotID and inserts a CREATING definition. Master only
-// stores sandboxID↔snapshotID (+ node on Complete); recreate meta is packed
-// with the snapshot on Cubelet (sandbox_spec.json).
-func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType string) (string, error) {
+// Begin allocates snapshotID and inserts a CREATING pause binding.
+func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType, backend string) (string, error) {
 	client := getDB()
 	if client == nil {
 		return "", ErrNotReady
@@ -93,6 +89,10 @@ func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType string) 
 	if sandboxID == "" {
 		return "", errors.New("sandboxID is required")
 	}
+	normalized, err := constants.NormalizeSnapshotBackend(backend)
+	if err != nil {
+		return "", err
+	}
 	if existing, err := GetBySandbox(ctx, sandboxID); err == nil && existing != nil {
 		return "", fmt.Errorf("sandbox %s already has pause snapshot %s", sandboxID, existing.SnapshotID)
 	} else if err != nil && !errors.Is(err, ErrNotFound) {
@@ -100,26 +100,24 @@ func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType string) 
 	}
 
 	snapID := GenerateSnapshotID()
-	def := &models.TemplateDefinition{
-		TemplateID:      snapID,
-		InstanceType:    strings.TrimSpace(instanceType),
-		Version:         "v1",
-		Status:          statusCreating,
-		Kind:            KindPauseSnapshot,
-		OriginSandboxID: sandboxID,
-		OriginNodeID:    strings.TrimSpace(nodeID),
-		StorageBackend:  "cubecow",
+	row := &models.PauseSnapshotRecord{
+		SnapshotID:          snapID,
+		SandboxID:           sandboxID,
+		NodeID:              strings.TrimSpace(nodeID),
+		NodeIP:              strings.TrimSpace(nodeIP),
+		InstanceType:        strings.TrimSpace(instanceType),
+		Status:              statusCreating,
+		Backend:             normalized,
+		RemoteStatus:        constants.SnapshotRemoteStatus(normalized),
+		OriginHostFactsJSON: freezeOriginHostFacts(ctx, nodeID),
 	}
-	if err := client.WithContext(ctx).Table(constants.TemplateDefinitionTableName).Create(def).Error; err != nil {
+	if err := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).Create(row).Error; err != nil {
 		return "", err
 	}
-	_ = nodeIP // placement finalized in Complete
 	return snapID, nil
 }
 
-// Complete marks the pause snapshot READY and records the node replica.
-// pluginVolumeIDs are the plugin volumes Detached with the live sandbox (node
-// 1→0); Resume rejects the sandbox if any of them were deleted meanwhile.
+// Complete marks the pause snapshot READY and records the node + plugin volumes.
 func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instanceType string, pluginVolumeIDs []string) error {
 	client := getDB()
 	if client == nil {
@@ -133,15 +131,18 @@ func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instan
 		return errors.New("sandboxID and snapshotID are required")
 	}
 	updates := map[string]any{
-		"status":         statusReady,
-		"last_error":     "",
-		"origin_node_id": nodeID,
+		"status":        statusReady,
+		"last_error":    "",
+		"node_id":       nodeID,
+		"node_ip":       strings.TrimSpace(nodeIP),
+		"instance_type": strings.TrimSpace(instanceType),
+		"updated_at":    gorm.Expr("CURRENT_TIMESTAMP"),
 	}
-	if raw, err := json.Marshal(pauseRequestJSON{PluginVolumeIDs: uniqueNonEmpty(pluginVolumeIDs)}); err == nil {
-		updates["request_json"] = string(raw)
+	if raw, err := json.Marshal(uniqueNonEmpty(pluginVolumeIDs)); err == nil {
+		updates["plugin_volume_ids"] = string(raw)
 	}
-	res := client.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("template_id = ? AND kind = ? AND origin_sandbox_id = ?", snapshotID, KindPauseSnapshot, sandboxID).
+	res := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
+		Where("snapshot_id = ? AND sandbox_id = ?", snapshotID, sandboxID).
 		Updates(updates)
 	if res.Error != nil {
 		return res.Error
@@ -149,41 +150,12 @@ func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instan
 	if res.RowsAffected == 0 {
 		return fmt.Errorf("%w: %s", ErrNotFound, snapshotID)
 	}
-
-	var existing models.TemplateReplica
-	err := client.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ? AND node_id = ?", snapshotID, nodeID).
-		First(&existing).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return client.WithContext(ctx).Table(constants.TemplateReplicaTableName).Create(&models.TemplateReplica{
-			TemplateID:   snapshotID,
-			NodeID:       nodeID,
-			NodeIP:       strings.TrimSpace(nodeIP),
-			InstanceType: strings.TrimSpace(instanceType),
-			Status:       replicaReady,
-			Phase:        replicaPhaseReady,
-		}).Error
-	}
-	if err != nil {
-		return err
-	}
-	return client.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ? AND node_id = ?", snapshotID, nodeID).
-		Updates(map[string]any{
-			"node_ip":       strings.TrimSpace(nodeIP),
-			"instance_type": strings.TrimSpace(instanceType),
-			"status":        replicaReady,
-			"phase":         replicaPhaseReady,
-			"error_message": "",
-		}).Error
+	return nil
 }
 
 // MarkFailed records a terminal Pause failure without deleting the binding or
 // asking Cubelet to drop local snap/sandbox rows. Used when Pause RPC fails or
 // times out: do not undo in-flight Cubelet work.
-//
-// Uses WithoutCancel so a cancelled HTTP request cannot leave status stuck at
-// CREATING after the lifecycle lock is released.
 func MarkFailed(ctx context.Context, sandboxID, snapshotID, errMsg string) {
 	client := getDB()
 	if client == nil {
@@ -202,19 +174,20 @@ func MarkFailed(ctx context.Context, sandboxID, snapshotID, errMsg string) {
 	if len(errMsg) > 1024 {
 		errMsg = errMsg[:1024]
 	}
-	res := client.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("template_id = ? AND kind = ? AND origin_sandbox_id = ? AND status IN ?",
-			snapshotID, KindPauseSnapshot, sandboxID, []string{statusCreating, statusFailed}).
+	res := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
+		Where("snapshot_id = ? AND sandbox_id = ? AND status IN ?",
+			snapshotID, sandboxID, []string{statusCreating, statusFailed}).
 		Updates(map[string]any{
 			"status":     statusFailed,
 			"last_error": errMsg,
+			"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
 		})
 	if res.Error != nil {
 		log.G(ctx).Warnf("pausesnap.MarkFailed sandbox=%s snap=%s: %v", sandboxID, snapshotID, res.Error)
 	}
 }
 
-// Abort removes a CREATING pause definition. Prefer MarkFailed for user-visible
+// Abort removes a CREATING pause binding. Prefer MarkFailed for user-visible
 // Pause failures; Abort is only for clearing stale bindings when the sandbox is
 // already RUNNING again (see clearStalePauseBindingIfRunning).
 func Abort(ctx context.Context, sandboxID, snapshotID string) {
@@ -227,15 +200,15 @@ func Abort(ctx context.Context, sandboxID, snapshotID string) {
 	if sandboxID == "" || snapshotID == "" {
 		return
 	}
-	if err := client.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("template_id = ? AND kind = ? AND origin_sandbox_id = ? AND status = ?",
-			snapshotID, KindPauseSnapshot, sandboxID, statusCreating).
-		Delete(&models.TemplateDefinition{}).Error; err != nil {
+	if err := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
+		Where("snapshot_id = ? AND sandbox_id = ? AND status = ?",
+			snapshotID, sandboxID, statusCreating).
+		Delete(&models.PauseSnapshotRecord{}).Error; err != nil {
 		log.G(ctx).Warnf("pausesnap.Abort delete failed sandbox=%s snap=%s: %v", sandboxID, snapshotID, err)
 	}
 }
 
-// GetBySandbox returns the READY (or latest) pause snapshot for a sandbox.
+// GetBySandbox returns the pause snapshot binding for a sandbox.
 func GetBySandbox(ctx context.Context, sandboxID string) (*Record, error) {
 	client := getDB()
 	if client == nil {
@@ -245,48 +218,83 @@ func GetBySandbox(ctx context.Context, sandboxID string) (*Record, error) {
 	if sandboxID == "" {
 		return nil, errors.New("sandboxID is required")
 	}
-	var def models.TemplateDefinition
-	err := client.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("origin_sandbox_id = ? AND kind = ?", sandboxID, KindPauseSnapshot).
+	var row models.PauseSnapshotRecord
+	err := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
+		Where("sandbox_id = ?", sandboxID).
 		Order("updated_at desc").
-		First(&def).Error
+		First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	rec := &Record{
-		SandboxID:       sandboxID,
-		SnapshotID:      def.TemplateID,
-		NodeID:          def.OriginNodeID,
-		Status:          def.Status,
-		LastError:       strings.TrimSpace(def.LastError),
-		PluginVolumeIDs: pluginVolumeIDsFromRequestJSON(def.RequestJSON),
-	}
-	var replica models.TemplateReplica
-	if err := client.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ?", def.TemplateID).
-		Order("updated_at desc").
-		First(&replica).Error; err == nil {
-		rec.NodeIP = replica.NodeIP
-		if rec.NodeID == "" {
-			rec.NodeID = replica.NodeID
-		}
-	}
-	return rec, nil
+	return recordFromModel(&row), nil
 }
 
-func pluginVolumeIDsFromRequestJSON(raw string) []string {
+// GetBySnapshotID returns the pause binding for a snapshot id.
+func GetBySnapshotID(ctx context.Context, snapshotID string) (*Record, error) {
+	client := getDB()
+	if client == nil {
+		return nil, ErrNotReady
+	}
+	snapshotID = strings.TrimSpace(snapshotID)
+	if snapshotID == "" {
+		return nil, errors.New("snapshotID is required")
+	}
+	var row models.PauseSnapshotRecord
+	err := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
+		Where("snapshot_id = ?", snapshotID).
+		First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return recordFromModel(&row), nil
+}
+
+func recordFromModel(row *models.PauseSnapshotRecord) *Record {
+	if row == nil {
+		return nil
+	}
+	return &Record{
+		SandboxID:           row.SandboxID,
+		SnapshotID:          row.SnapshotID,
+		NodeID:              row.NodeID,
+		NodeIP:              row.NodeIP,
+		InstanceType:        row.InstanceType,
+		Status:              row.Status,
+		LastError:           strings.TrimSpace(row.LastError),
+		PluginVolumeIDs:     pluginVolumeIDsFromJSON(row.PluginVolumeIDs),
+		Backend:             row.Backend,
+		RemoteStatus:        row.RemoteStatus,
+		OriginHostFactsJSON: row.OriginHostFactsJSON,
+	}
+}
+
+func freezeOriginHostFacts(ctx context.Context, nodeID string) string {
+	facts, ok := nodemeta.GetNodeHostFacts(ctx, nodeID)
+	if !ok || facts == nil {
+		facts, ok = nodemeta.GetPersistedNodeHostFacts(ctx, nodeID)
+		if !ok || facts == nil {
+			return ""
+		}
+	}
+	return nodemeta.RestoreMatchFactsJSON(facts)
+}
+
+func pluginVolumeIDsFromJSON(raw string) []string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}
-	var meta pauseRequestJSON
-	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
 		return nil
 	}
-	return uniqueNonEmpty(meta.PluginVolumeIDs)
+	return uniqueNonEmpty(ids)
 }
 
 func uniqueNonEmpty(ids []string) []string {
@@ -309,7 +317,7 @@ func uniqueNonEmpty(ids []string) []string {
 	return out
 }
 
-// Delete removes pause-snapshot definition + replicas (best-effort GC after Resume).
+// Delete removes the pause-snapshot binding (best-effort GC after Resume).
 func Delete(ctx context.Context, snapshotID string) error {
 	client := getDB()
 	if client == nil {
@@ -319,12 +327,7 @@ func Delete(ctx context.Context, snapshotID string) error {
 	if snapshotID == "" {
 		return errors.New("snapshotID is required")
 	}
-	if err := client.WithContext(ctx).Table(constants.TemplateReplicaTableName).
-		Where("template_id = ?", snapshotID).
-		Delete(&models.TemplateReplica{}).Error; err != nil {
-		return err
-	}
-	return client.WithContext(ctx).Table(constants.TemplateDefinitionTableName).
-		Where("template_id = ? AND kind = ?", snapshotID, KindPauseSnapshot).
-		Delete(&models.TemplateDefinition{}).Error
+	return client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
+		Where("snapshot_id = ?", snapshotID).
+		Delete(&models.PauseSnapshotRecord{}).Error
 }
