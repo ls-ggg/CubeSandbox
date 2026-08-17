@@ -198,10 +198,10 @@ func expandPauseSnapshotPackage(req *cubebox.RunCubeSandboxRequest) error {
 	}
 	req.Annotations[constants.MasterAnnotationRuntimeSnapshotAttachedAt] = attachedAt
 	delete(req.Annotations, constants.MasterAnnotationsAppSnapshotCreate)
-	// Packed Create-from-template still carries appsnapshot.template.id=tpl-*.
-	// GetSnapshotTemplateID prefers that over runtime.snapshot.id, which would
-	// restore template snapshot_base with pause memory and panic the guest.
-	delete(req.Annotations, constants.MasterAnnotationAppSnapshotTemplateID)
+	// Keep appsnapshot.template.id=tpl-* so Resume can EnsureCubeRunTemplate
+	// the original template (kernel／image). GetSnapshotTemplateID still
+	// prefers runtime.snapshot.id=snap-* while pause.snapshot.id is set, so
+	// storage restore stays on the pause catalog.
 
 	// Prefer packed values; fall back to thin Create for older pause snaps.
 	if req.GetCubeNetworkConfig() == nil {

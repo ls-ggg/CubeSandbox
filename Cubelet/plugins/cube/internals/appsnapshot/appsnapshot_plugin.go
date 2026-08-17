@@ -7,6 +7,7 @@ package appsnapshot
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
@@ -64,6 +65,15 @@ func (l *appsnapshotCompleter) Create(ctx context.Context, opts *workflow.Create
 
 	if !opts.IsCubeboxV2() {
 		return nil
+	}
+
+	// Pause snaps are storage catalogs, not Cube run templates. Resume still
+	// needs the original tpl-* for kernel／image components.
+	if opts.IsPauseResume() {
+		ann := opts.ReqInfo.GetAnnotations()
+		if orig := strings.TrimSpace(ann[constants.MasterAnnotationAppSnapshotTemplateID]); orig != "" {
+			templateID = orig
+		}
 	}
 
 	lrt, err := l.runtemplateManager.EnsureCubeRunTemplate(ctx, templateID)

@@ -457,17 +457,27 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	if _, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID); errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
+		if other := otherCowBackend(backend); other != backend {
+			if _, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
+				backend = other
+			}
+		}
+	}
 	refs, snapshotPath, err := resolveCleanupRefs(ctx, backend, rsp.TemplateID, req.GetObjects(), req.GetSnapshotPath())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	// Always drop the on-disk package (S3 pause-snapshots/snapshots home)
+	// even when cubecow objects are already gone or still busy. Returning
+	// early on object cleanup leaked S3 pause-snapshot dirs after Resume.
 	if storage.IsCowBackend() {
 		if err := storage.CleanupObjectsFor(ctx, backend, refs); err != nil {
+			log.G(ctx).Warnf("CleanupTemplate %s: cubecow object cleanup: %v", rsp.TemplateID, err)
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to cleanup cubecow objects: %v", err)
-			return rsp, nil
 		}
 	}
 	if err := storage.CleanupTemplateLocalData(ctx, rsp.TemplateID, snapshotPath); err != nil {
@@ -503,6 +513,13 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 		return refs, ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, templateID)
+	if err != nil || entry == nil {
+		if other := otherCowBackend(backend); other != backend {
+			if alt, altErr := storage.GetLocalSnapshotFor(ctx, other, templateID); altErr == nil && alt != nil {
+				entry, err, backend = alt, nil, other
+			}
+		}
+	}
 	if err == nil && entry != nil {
 		refs := cubecowRefsFromCatalogEntry(templateID, entry)
 		snapshotPath := strings.TrimSpace(entry.SnapshotPath)
@@ -519,6 +536,14 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 	return storage.DefaultTemplateObjectRefs(templateID), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
 }
 
+func otherCowBackend(backend string) string {
+	normalized, err := resolveRequestStorageBackend(backend)
+	if err == nil && normalized == cow.BackendS3 {
+		return cow.BackendXFS
+	}
+	return cow.BackendS3
+}
+
 func ensureSnapshotCleanupPath(ctx context.Context, backend, templateID, snapshotPath string) string {
 	if strings.TrimSpace(snapshotPath) != "" {
 		return snapshotPath
@@ -527,10 +552,20 @@ func ensureSnapshotCleanupPath(ctx context.Context, backend, templateID, snapsho
 		log.G(ctx).Warnf("CleanupTemplate %s: cannot derive snapshot dir, unsafe templateID: %v", templateID, err)
 		return snapshotPath
 	}
+	for _, kind := range []string{storage.SnapshotKindPause, storage.SnapshotKindNormal} {
+		home := storage.SnapshotHome(backend, kind, templateID)
+		if home == "" {
+			continue
+		}
+		if _, err := os.Stat(home); err == nil {
+			log.G(ctx).Infof("CleanupTemplate %s: using existing snapshot dir %q", templateID, home)
+			return home
+		}
+	}
 	root := snapshotRootForBackend(backend)
 	guessed := filepath.Join(root, "cubebox", templateID)
 	if b, berr := resolveRequestStorageBackend(backend); berr == nil && b == cow.BackendS3 {
-		guessed = filepath.Join(root, templateID)
+		guessed = storage.SnapshotHome(backend, storage.SnapshotKindNormal, templateID)
 	}
 	if _, err := pathutil.ValidatePathUnderBase(root, guessed); err != nil {
 		log.G(ctx).Warnf("CleanupTemplate %s: derived snapshot dir %q rejected: %v", templateID, guessed, err)

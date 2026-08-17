@@ -752,7 +752,12 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 	}
 	if rsp.Ret.RetCode == errorcode.ErrorCode_Success && pauseSnapToGC != "" {
 		backend, _ := storageBackendFromAnnotations(req.GetAnnotations())
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, backend)
+		if sb != nil {
+			if b := pauseCatalogBackend(sb); b != "" {
+				backend = b
+			}
+		}
+		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend, pauseSnapToGC))
 	}
 	return rsp, nil
 }

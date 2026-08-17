@@ -24,6 +24,7 @@ import (
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	"github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
@@ -67,6 +68,28 @@ func stampPauseSnapshotID(sb *cubeboxstore.CubeBox, snapID string) {
 	sb.AddAnnotations(map[string]string{constants.MasterAnnotationPauseSnapshotID: snapID})
 }
 
+func stampedPauseSnapshotID(sb *cubeboxstore.CubeBox) string {
+	if sb == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(sb.Labels[constants.MasterAnnotationPauseSnapshotID]); id != "" {
+		return id
+	}
+	return strings.TrimSpace(sb.Annotations[constants.MasterAnnotationPauseSnapshotID])
+}
+
+// replacedLivePauseSnapshotID is the pause snap Resume left as live. After a
+// new Pause succeeds, Cubelet CleanupTemplate's it (keep_tombstone already
+// tore down the running overlay). Empty on the first Pause from a template.
+func replacedLivePauseSnapshotID(prev, newID string) string {
+	prev = strings.TrimSpace(prev)
+	newID = strings.TrimSpace(newID)
+	if prev == "" || prev == newID {
+		return ""
+	}
+	return prev
+}
+
 // updateWithPauseCow pauses a running sandbox into a CubeCow-backed catalog
 // snapshot (same layout as CommitSandbox), packs sandbox_spec.json beside the
 // snapshot files, asks the shim to exit, then fully destroys the live sandbox.
@@ -98,6 +121,7 @@ func (s *service) updateWithPauseCow(
 		return rsp, nil
 	}
 	stepLog = stepLog.WithFields(CubeLog.Fields{"backend": backend})
+	prevLiveSnap := stampedPauseSnapshotID(sb)
 	stampPauseSnapshotID(sb, snapID)
 	_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
 
@@ -348,6 +372,10 @@ func (s *service) updateWithPauseCow(
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	if prev := replacedLivePauseSnapshotID(prevLiveSnap, snapID); prev != "" {
+		stepLog.Infof("pause replaced live snap %s with %s; CleanupTemplate previous", prev, snapID)
+		s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev, cleanupBackendForPauseSnap(backend, prev))
+	}
 	return rsp, nil
 }
 
@@ -448,29 +476,32 @@ func pauseSnapshotIDForGC(sb *cubeboxstore.CubeBox) string {
 	if sb == nil {
 		return ""
 	}
+	backend := pauseCatalogBackend(sb)
 	pauseIDs := []string{
 		strings.TrimSpace(sb.Labels[constants.MasterAnnotationPauseSnapshotID]),
 		strings.TrimSpace(sb.Annotations[constants.MasterAnnotationPauseSnapshotID]),
 	}
-	if id := firstPauseSnapshotID(pauseIDs, true, pauseCatalogBackend(sb)); id != "" {
+	if id := firstPauseSnapshotID(pauseIDs, true, backend); id != "" {
 		return id
 	}
 	runtimeIDs := []string{
 		strings.TrimSpace(sb.Labels[constants.MasterAnnotationRuntimeSnapshotID]),
 		strings.TrimSpace(sb.Annotations[constants.MasterAnnotationRuntimeSnapshotID]),
 	}
-	return firstPauseSnapshotID(runtimeIDs, false, pauseCatalogBackend(sb))
+	return firstPauseSnapshotID(runtimeIDs, false, backend)
 }
 
 func pauseCatalogBackend(sb *cubeboxstore.CubeBox) string {
 	if sb == nil {
 		return ""
 	}
-	backend, err := storageBackendFromAnnotations(sb.Annotations)
-	if err != nil {
-		return ""
+	if backend, err := storageBackendFromAnnotations(sb.Annotations); err == nil && strings.TrimSpace(sb.Annotations[constants.MasterAnnotationStorageBackend]) != "" {
+		return backend
 	}
-	return backend
+	if backend, err := storageBackendFromAnnotations(sb.Labels); err == nil && strings.TrimSpace(sb.Labels[constants.MasterAnnotationStorageBackend]) != "" {
+		return backend
+	}
+	return ""
 }
 
 func firstPauseSnapshotID(candidates []string, allowCatalogMiss bool, backend string) string {
@@ -478,8 +509,7 @@ func firstPauseSnapshotID(candidates []string, allowCatalogMiss bool, backend st
 		if id == "" {
 			continue
 		}
-		entry, err := storage.GetLocalSnapshotFor(context.Background(), backend, id)
-		if err == nil && entry != nil {
+		if entry, _ := lookupPauseCatalog(id, backend); entry != nil {
 			if strings.EqualFold(strings.TrimSpace(entry.Kind), storage.CatalogKindPauseSnapshot) {
 				return id
 			}
@@ -492,11 +522,42 @@ func firstPauseSnapshotID(candidates []string, allowCatalogMiss bool, backend st
 	return ""
 }
 
+func lookupPauseCatalog(id, preferred string) (*storage.SnapshotCatalogEntry, string) {
+	seen := map[string]struct{}{}
+	for _, backend := range []string{preferred, cow.BackendS3, cow.BackendXFS} {
+		backend = strings.TrimSpace(backend)
+		if backend == "" {
+			continue
+		}
+		if _, ok := seen[backend]; ok {
+			continue
+		}
+		seen[backend] = struct{}{}
+		entry, err := storage.GetLocalSnapshotFor(context.Background(), backend, id)
+		if err == nil && entry != nil {
+			return entry, backend
+		}
+	}
+	return nil, preferred
+}
+
+func cleanupBackendForPauseSnap(preferred, snapID string) string {
+	if _, used := lookupPauseCatalog(snapID, preferred); strings.TrimSpace(used) != "" {
+		return used
+	}
+	if strings.TrimSpace(preferred) != "" {
+		return preferred
+	}
+	return cow.BackendXFS
+}
+
 // pauseSnapIDToGCOnDestroy is the Destroy-time pause-snap GC decision.
-// keep_tombstone / delete_tombstone still own the snap (Master CleanupTemplate).
-// PAUSED without those flags is not expected on the user Destroy path; skip GC
-// so we cannot drop a live pause snap if someone cubecli-destroys a tombstone.
-// UNKNOWN / FAILED / RUNNING / PAUSING may hold half-finished or leftover snaps.
+// keep_tombstone / delete_tombstone still own the new pause snap. Cubelet
+// CleanupTemplate's the previous live pause snap after Pause succeeds.
+// PAUSED without those flags is not expected on the user Destroy path; skip
+// GC so we cannot drop a live pause snap if someone cubecli-destroys a
+// tombstone. UNKNOWN / FAILED / RUNNING / PAUSING may hold half-finished
+// or leftover snaps.
 func pauseSnapIDToGCOnDestroy(req *cubebox.DestroyCubeSandboxRequest, sb *cubeboxstore.CubeBox) string {
 	if sb == nil || isPauseKeepTombstone(req) || isPauseDeleteTombstone(req) {
 		return ""
@@ -507,8 +568,9 @@ func pauseSnapIDToGCOnDestroy(req *cubebox.DestroyCubeSandboxRequest, sb *cubebo
 	return pauseSnapshotIDForGC(sb)
 }
 
-// bestEffortCleanupPauseSnapshot removes a leftover pause catalog (primary GC
-// is Master CleanupTemplate right after Resume; this is a destroy-time fallback).
+// bestEffortCleanupPauseSnapshot removes a pause catalog. After Pause
+// succeeds Cubelet GCs the previous live pause snap here; Destroy is the
+// leftover / failed-pause fallback. Master is not in this path.
 func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID, snapID, backend string) {
 	snapID = strings.TrimSpace(snapID)
 	if snapID == "" {

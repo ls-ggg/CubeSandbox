@@ -33,6 +33,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -187,7 +188,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 				logEntry.Errorf("check snapshot path failed: %s", "local run template is nil")
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "local snapshot not exist")
 			}
-			paths, err := e.resolveSnapshotPaths(templateID, flowOpts.LocalRunTemplate.Snapshot.Snapshot.Path, flowOpts.ReqInfo)
+			paths, err := e.resolveSnapshotPaths(templateID, snapshotRestoreRawPath(ctx, flowOpts), flowOpts.ReqInfo)
 			if err != nil {
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 			}
@@ -501,6 +502,74 @@ func resolveTemplateComponentPath(localTemplate *templatetypes.LocalRunTemplate,
 		return ""
 	}
 	return strings.TrimSpace(component.Component.Path)
+}
+
+// snapshotRestoreRawPath is the hypervisor snapshot package Cubelet hands
+// the shim. Pause resume must use the pause catalog metadata home even
+// though LocalRunTemplate is the original tpl-* (needed for kernel／image
+// EnsureCubeRunTemplate). Using the template 2C2000M path with pause
+// memory hangs shim Task.Create.
+func snapshotRestoreRawPath(ctx context.Context, flowOpts *workflow.CreateContext) string {
+	raw := ""
+	if flowOpts != nil && flowOpts.LocalRunTemplate != nil {
+		raw = strings.TrimSpace(flowOpts.LocalRunTemplate.Snapshot.Snapshot.Path)
+	}
+	if flowOpts == nil || !flowOpts.IsPauseResume() {
+		return raw
+	}
+	snapID, ok := flowOpts.GetSnapshotTemplateID()
+	if !ok {
+		return raw
+	}
+	if meta := pauseCatalogMetaDir(ctx, snapID, pauseResumeCatalogBackend(flowOpts)); meta != "" {
+		return meta
+	}
+	return raw
+}
+
+func pauseResumeCatalogBackend(flowOpts *workflow.CreateContext) string {
+	if flowOpts == nil || flowOpts.ReqInfo == nil {
+		return cow.BackendXFS
+	}
+	if raw := strings.TrimSpace(flowOpts.ReqInfo.GetBackend()); raw != "" {
+		if b, err := cow.NormalizeBackend(raw); err == nil {
+			return b
+		}
+	}
+	raw := strings.TrimSpace(flowOpts.ReqInfo.GetAnnotations()[constants.MasterAnnotationStorageBackend])
+	if raw == "" {
+		return cow.BackendXFS
+	}
+	b, err := cow.NormalizeBackend(raw)
+	if err != nil {
+		return cow.BackendXFS
+	}
+	return b
+}
+
+func pauseCatalogMetaDir(ctx context.Context, snapID, preferred string) string {
+	seen := map[string]struct{}{}
+	for _, backend := range []string{preferred, cow.BackendXFS, cow.BackendS3} {
+		backend = strings.TrimSpace(backend)
+		if backend == "" {
+			continue
+		}
+		if _, ok := seen[backend]; ok {
+			continue
+		}
+		seen[backend] = struct{}{}
+		entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapID)
+		if err != nil || entry == nil {
+			continue
+		}
+		if meta := strings.TrimSpace(entry.MetaDir); meta != "" {
+			return meta
+		}
+		if home := strings.TrimSpace(entry.SnapshotPath); home != "" {
+			return filepath.Join(home, storage.SnapshotMetadataDir)
+		}
+	}
+	return ""
 }
 
 func (e *cubeboxInstancePlugin) resolveSnapshotPaths(templateID, rawPath string, req *cubebox.RunCubeSandboxRequest) (*snapshotPaths, error) {
