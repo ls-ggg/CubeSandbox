@@ -461,9 +461,8 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, err)
 	}
 
-	if raw := uploadRemoteUUIDsIfS3(ctx, backend, templateID); raw != "" {
-		rsp.RemoteUuids = raw
-	}
+	// Templates stay node-local: no cubecow_export_snapshot. Cross-node
+	// export applies to Pause and ordinary CommitSandbox snapshots only.
 
 	stepLog.Infof("AppSnapshot completed successfully: snapshotPath=%s", snapshotPath)
 	rsp.Ret.RetMsg = "success"

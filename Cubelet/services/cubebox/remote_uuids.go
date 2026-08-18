@@ -13,10 +13,11 @@ import (
 )
 
 // uploadRemoteUUIDsIfS3 runs cubecow_export_snapshot (via UploadSnapshot)
-// before Pause / Commit / AppSnapshot returns. XFS is a no-op. Export
-// failure is logged and returns empty — the customer-facing RPC still
-// succeeds; Master records remote_status=failed without uuids (same-node
-// resume does not need them; cross-node needs ready + uuids).
+// before Pause / ordinary CommitSandbox returns. Templates (AppSnapshot)
+// do not export. XFS is a no-op. Export failure is logged and returns
+// empty — the customer-facing RPC still succeeds; Master records
+// remote_status=failed without uuids (same-node resume does not need
+// them; cross-node needs ready + uuids).
 func uploadRemoteUUIDsIfS3(ctx context.Context, backend, snapshotID string) string {
 	normalized, err := cow.NormalizeBackend(backend)
 	if err != nil || normalized != cow.BackendS3 {
