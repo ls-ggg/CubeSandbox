@@ -96,12 +96,19 @@ type Engine struct {
 }
 
 // Volume holds volume information returned by the engine.
+//
+// ExportUUID/ExportStatus/Deletable are populated only when the entry
+// is an exported snapshot; see the S3 backend design doc §2.8 for the
+// underlying rcow_get_snapshot_status contract.
 type Volume struct {
 	Name          string `json:"name"`
 	SizeBytes     uint64 `json:"size_bytes"`
 	DevicePath    string `json:"device_path"`
 	SnapshotCount int32  `json:"snapshot_count"`
 	CreatedAt     string `json:"created_at"`
+	ExportUUID    string `json:"export_uuid"`
+	ExportStatus  string `json:"export_status"`
+	Deletable     *bool  `json:"deletable"`
 }
 
 // Snapshot holds snapshot information returned by the engine.
@@ -238,35 +245,27 @@ func (e *Engine) ResizeVolume(name string, newSizeBytes uint64) (uint64, uint64,
 	return uint64(oldSize), uint64(newSize), nil
 }
 
-// GetVolumeInfo retrieves volume information by name.
+// GetVolumeInfo retrieves volume/snapshot information by name.
+//
+// The FFI layer returns a single JSON object; see cubecow.h /
+// cubecow_get_volume_info for the exact schema, including the S3
+// export_uuid / export_status / deletable fields.
 func (e *Engine) GetVolumeInfo(name string) (*Volume, error) {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	var sizeBytes C.uint64_t
-	var cDevicePath, cCreatedAt *C.char
-	var snapCount C.int32_t
-
-	rc := C.cubecow_get_volume_info(
-		e.ptr, cName,
-		&sizeBytes, &cDevicePath, &snapCount, &cCreatedAt,
-	)
+	var cJSON *C.char
+	rc := C.cubecow_get_volume_info(e.ptr, cName, &cJSON)
 	if rc != 0 {
 		return nil, makeError(rc)
 	}
+	defer C.cubecow_free_string(cJSON)
 
-	vol := &Volume{
-		Name:          name,
-		SizeBytes:     uint64(sizeBytes),
-		DevicePath:    C.GoString(cDevicePath),
-		SnapshotCount: int32(snapCount),
-		CreatedAt:     C.GoString(cCreatedAt),
+	var vol Volume
+	if err := json.Unmarshal([]byte(C.GoString(cJSON)), &vol); err != nil {
+		return nil, fmt.Errorf("unmarshal cubecow_get_volume_info response: %w", err)
 	}
-
-	C.cubecow_free_string(cDevicePath)
-	C.cubecow_free_string(cCreatedAt)
-
-	return vol, nil
+	return &vol, nil
 }
 
 // GetVolumeBlockInfo retrieves block-level info for a volume.

@@ -475,7 +475,14 @@ func doGetVolumeInfo(engine *cubecow.Engine, name string) {
 	fmt.Printf("    SizeBytes:      %d\n", vol.SizeBytes)
 	fmt.Printf("    DevicePath:     %s\n", vol.DevicePath)
 	fmt.Printf("    SnapshotCount:  %d\n", vol.SnapshotCount)
-	fmt.Printf("    CreatedAt:      %s\n\n", vol.CreatedAt)
+	fmt.Printf("    CreatedAt:      %s\n", vol.CreatedAt)
+	fmt.Printf("    ExportUUID:     %s\n", vol.ExportUUID)
+	fmt.Printf("    ExportStatus:   %s\n", vol.ExportStatus)
+	if vol.Deletable == nil {
+		fmt.Printf("    Deletable:      <n/a>\n\n")
+	} else {
+		fmt.Printf("    Deletable:      %v\n\n", *vol.Deletable)
+	}
 }
 
 func doGetVolumeBlockInfo(engine *cubecow.Engine, name string) {

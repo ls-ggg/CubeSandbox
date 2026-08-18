@@ -158,16 +158,37 @@ int32_t cubecow_resize_volume(
     uint64_t* out_new_size);
 
 /*
- * Get volume information by name. All out-params are optional (NULL).
- * String out-params must be freed by the caller with cubecow_free_string().
+ * Get volume/snapshot information by name as a JSON string.
+ *
+ * out_json receives a heap-allocated JSON object (caller frees with
+ * cubecow_free_string). The object has fields:
+ *   {
+ *     "name":           "...",
+ *     "size_bytes":     0,
+ *     "device_path":    "...",
+ *     "snapshot_count": 0,
+ *     "created_at":     "...",
+ *     "export_uuid":    "",
+ *     "export_status":  "",
+ *     "deletable":      null
+ *   }
+ *
+ * Notes on the export_* / deletable fields (see S3 backend design
+ * doc §2.8 for the underlying rcow_get_snapshot_status contract):
+ *   - export_uuid   is "" for plain volumes and for snapshots that
+ *                   have never been exported.
+ *   - export_status is one of "", "NONE", "INPROGRESS", "DONE".
+ *                   Empty when the entry is not an exported snapshot
+ *                   or when the refresh RPC transiently failed.
+ *   - deletable     is null when not applicable, otherwise true/false.
+ *
+ * out_json is optional (may be NULL); when NULL the call still
+ * validates the entry exists but produces no payload.
  */
 int32_t cubecow_get_volume_info(
     CubecowEngineHandle engine,
     const char* name,
-    uint64_t* out_size_bytes,
-    char** out_device_path,
-    int32_t* out_snapshot_count,
-    char** out_created_at);
+    char** out_json);
 
 /*
  * Get block-level info for a volume.
@@ -259,17 +280,15 @@ int32_t cubecow_list_snapshots(
     char** out_next_page_token);
 
 /* ------------------------------------------------------------------ */
-/* Cross-node export / import                                          */
+/* Cross-node export / import (backend-specific)                       */
 /* ------------------------------------------------------------------ */
 
 /*
- * Publish a snapshot volume for cross-node use.
+ * Publish a read-only snapshot for cross-node recovery.
  *
- * On success writes an opaque export_uuid to out_export_uuid (caller
- * frees with cubecow_free_string). Upload progress will come from
- * cubecow_get_volume_info; Cubelet Status mocks ready until that field
- * exists. Backends that do not support cross-node return
- * COW_ERR_PRECONDITION_FAILED.
+ * On success writes the opaque export_uuid to out_export_uuid (owned
+ * C string, caller frees with cubecow_free_string). Backends that do
+ * not support cross-node recovery return COW_ERR_PRECONDITION_FAILED.
  */
 int32_t cubecow_export_snapshot(
     CubecowEngineHandle engine,
@@ -278,12 +297,11 @@ int32_t cubecow_export_snapshot(
 
 /*
  * Instantiate a writable volume from an export_uuid produced by a
- * remote cubecow_export_snapshot(). The imported name is a normal
- * volume (has a block device after activate). Import may leave the
- * device inactive; pass activate via a follow-up cubecow_activate_volume
- * or let the backend activate as part of import.
+ * remote node's cubecow_export_snapshot().
  *
- * Backends that do not support cross-node return COW_ERR_PRECONDITION_FAILED.
+ * On success writes the new volume's device path to out_device_path
+ * (owned C string, caller frees). Backends that do not support
+ * cross-node recovery return COW_ERR_PRECONDITION_FAILED.
  */
 int32_t cubecow_import_lvol(
     CubecowEngineHandle engine,

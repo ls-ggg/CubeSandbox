@@ -14,6 +14,7 @@
 // [`crate::initialize`] based on [`crate::config::BackendKind`].
 
 pub mod reflink;
+pub mod s3;
 
 use std::collections::HashMap;
 
@@ -100,14 +101,14 @@ pub trait Engine: Send + Sync {
     // Cross-node export / import (optional; backend-specific)
     // -----------------------------------------------------------------------
 
-    /// Publish a snapshot for cross-node recovery. Returns an opaque export_uuid.
+    /// Export a snapshot for cross-node recovery. Returns an opaque `export_uuid`.
     fn export_snapshot(&self, _snapshot_name: &str) -> CubecowResult<String> {
         Err(CubecowError::PreconditionFailed(
             "export_snapshot is not implemented by this backend".to_string(),
         ))
     }
 
-    /// Import a writable volume from an export_uuid produced by a remote node.
+    /// Import a writable volume from an `export_uuid` produced by a remote node.
     fn import_lvol(&self, _lvol_name: &str, _export_uuid: &str) -> CubecowResult<Volume> {
         Err(CubecowError::PreconditionFailed(
             "import_lvol is not implemented by this backend".to_string(),

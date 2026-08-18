@@ -283,6 +283,9 @@ impl ReflinkEngine {
             device_path: main.to_string_lossy().into_owned(),
             snapshot_count,
             created_at: rfc3339_from_meta(&meta),
+            export_uuid: String::new(),
+            export_status: String::new(),
+            deletable: None,
         })
     }
 
@@ -324,6 +327,9 @@ impl ReflinkEngine {
             device_path: path.to_string_lossy().into_owned(),
             origin_volume: origin,
             created_at: rfc3339_from_meta(&meta),
+            export_uuid: String::new(),
+            export_status: String::new(),
+            deletable: None,
         })
     }
 
@@ -571,6 +577,9 @@ impl Engine for ReflinkEngine {
                     device_path: snap.device_path,
                     snapshot_count: 0,
                     created_at: snap.created_at,
+                    export_uuid: snap.export_uuid,
+                    export_status: snap.export_status,
+                    deletable: snap.deletable,
                 })
             }
             None => Err(CubecowError::NotFound(format!(
@@ -881,6 +890,9 @@ impl Engine for ReflinkEngine {
                     device_path: snap.device_path,
                     snapshot_count: 0,
                     created_at: snap.created_at,
+                    export_uuid: snap.export_uuid,
+                    export_status: snap.export_status,
+                    deletable: snap.deletable,
                 })
             }
             None => Err(CubecowError::NotFound(format!(

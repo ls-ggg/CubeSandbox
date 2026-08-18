@@ -89,12 +89,9 @@ int32_t cubecow_resize_volume(
     uint64_t* out_new_size);
 
 int32_t cubecow_get_volume_info(
-    void* engine,
+    CubecowEngineHandle engine,
     const char* name,
-    uint64_t* out_size_bytes,
-    char** out_device_path,
-    int32_t* out_snapshot_count,
-    char** out_created_at);
+    char** out_json);
 
 int32_t cubecow_get_volume_block_info(
     void* engine,
