@@ -119,7 +119,21 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 	}
 
 	released := volrefcount.ReleasedVolumeIDs(cubeRsp.GetExtInfo())
-	if err := pausesnap.Complete(ctx, req.SandboxID, snapID, nodeID, hostIP, req.InstanceType, released); err != nil {
+	exportUUIDs := ""
+	if constants.IsS3Backend(req.Backend) {
+		exportUUIDs = strings.TrimSpace(cubeRsp.GetRemoteUuids())
+		if exportUUIDs == "" {
+			exportUUIDs = remoteUUIDsFromExtInfo(cubeRsp.GetExtInfo())
+		}
+		if exportUUIDs == "" {
+			msg := "s3 pause returned empty remote_uuids"
+			pausesnap.MarkFailed(ctx, req.SandboxID, snapID, msg)
+			rsp.Ret.RetCode = int(errorcode.ErrorCode_Unknown)
+			rsp.Ret.RetMsg = msg
+			return rsp
+		}
+	}
+	if err := pausesnap.Complete(ctx, req.SandboxID, snapID, nodeID, hostIP, req.InstanceType, released, exportUUIDs); err != nil {
 		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, err.Error())
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
 		rsp.Ret.RetMsg = fmt.Sprintf("pause ok on cubelet but master meta failed: %v", err)
@@ -182,7 +196,7 @@ func recoverTimedOutPauseForResume(ctx context.Context, req *types.UpdateRequest
 	log.G(ctx).Warnf("resume: healing timed-out pause binding sandbox=%s snap=%s host=%s (cubelet PAUSED; no ext_info)",
 		req.SandboxID, rec.SnapshotID, probeIP)
 	// No ApplyFromExtInfo: timeout means Master never saw volume events.
-	if err := pausesnap.Complete(ctx, req.SandboxID, rec.SnapshotID, nodeID, probeIP, req.InstanceType, nil); err != nil {
+	if err := pausesnap.Complete(ctx, req.SandboxID, rec.SnapshotID, nodeID, probeIP, req.InstanceType, nil, rec.ExportUUIDs); err != nil {
 		return nil, fmt.Errorf("cannot resume: pause timeout heal complete failed: %w", err)
 	}
 	healed, err := pausesnap.GetBySandbox(ctx, req.SandboxID)
@@ -371,6 +385,11 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	if b := strings.TrimSpace(rec.Backend); b != "" {
 		cubeletReq.Backend = b
 		cubeletReq.Annotations[constants.CubeAnnotationStorageBackend] = b
+	}
+	if constants.IsS3Backend(rec.Backend) {
+		if raw := strings.TrimSpace(rec.ExportUUIDs); raw != "" {
+			cubeletReq.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
+		}
 	}
 	fillResumeRecreateFields(ctx, req.SandboxID, cubeletReq, createReq)
 
@@ -576,4 +595,13 @@ func pauseResumePlacementInput(rec *pausesnap.Record, instanceType string, creat
 		}
 	}
 	return in
+}
+
+const extInfoRemoteUUIDs = "remote_uuids"
+
+func remoteUUIDsFromExtInfo(extInfo map[string][]byte) string {
+	if len(extInfo) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(extInfo[extInfoRemoteUUIDs]))
 }

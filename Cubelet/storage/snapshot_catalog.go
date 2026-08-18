@@ -67,7 +67,13 @@ type SnapshotCatalogEntry struct {
 	CreatedAt string `json:"created_at,omitempty"`
 	// Backend is xfs|s3. Empty on legacy catalog.json means xfs.
 	Backend string `json:"backend,omitempty"`
+	// RemoteUUIDs are cubecow_export_snapshot ids for each disk role.
+	// Required for cross-node cubecow_import_lvol. Empty on xfs.
+	RemoteUUIDs *cow.RemoteUUIDs `json:"remote_uuids,omitempty"`
 }
+
+// ExtInfoRemoteUUIDs is the Update/Pause ext_info key carrying remote_uuids JSON.
+const ExtInfoRemoteUUIDs = "remote_uuids"
 
 // Catalog entry kinds. See SnapshotCatalogEntry.Kind.
 const (

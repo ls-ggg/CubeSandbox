@@ -334,6 +334,7 @@ func (s *service) updateWithPauseCow(
 		MemoryKind:      memoryObject.Kind,
 		RootfsSizeBytes: rootfsObject.SizeBytes,
 		Kind:            storage.CatalogKindPauseSnapshot,
+		Backend:         backend,
 	}); err != nil {
 		// catalog.json is required for Resume / List / cross-node; do not mark
 		// PAUSED without it (sandbox_spec / memory.dev already fail hard above).
@@ -358,12 +359,26 @@ func (s *service) updateWithPauseCow(
 	}
 	_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
 
+	remoteUUIDsJSON := ""
+	if raw, err := uploadRemoteUUIDsIfS3(workCtx, backend, snapID); err != nil {
+		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to export pause snapshot: %v", err))
+	} else {
+		remoteUUIDsJSON = raw
+	}
+
 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
 	// Always attach whatever volume ref events were observed — Detach may have
 	// succeeded (node 1→0) even when later cleanup fails. Master still needs
 	// to apply those deltas on an explicit Pause failure.
+	if remoteUUIDsJSON != "" {
+		if extInfo == nil {
+			extInfo = map[string][]byte{}
+		}
+		extInfo[storage.ExtInfoRemoteUUIDs] = []byte(remoteUUIDsJSON)
+	}
 	rsp.ExtInfo = extInfo
+	rsp.RemoteUuids = remoteUUIDsJSON
 	if err != nil {
 		// Snapshot is on disk; do not wipe it. Master records FAILED (no Resume).
 		markLocalPauseFailed(sb, err)

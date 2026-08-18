@@ -635,6 +635,11 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 	if b := strings.TrimSpace(src.Backend); b != "" {
 		reqInOut.Annotations[constants.CubeAnnotationStorageBackend] = b
 	}
+	if constants.IsS3Backend(src.Backend) {
+		if raw := strings.TrimSpace(src.ExportUUIDs); raw != "" {
+			reqInOut.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
+		}
+	}
 
 	if placement.CrossNode {
 		reqInOut.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal] = "true"

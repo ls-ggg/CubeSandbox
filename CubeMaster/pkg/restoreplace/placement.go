@@ -76,8 +76,7 @@ func crossNodeBlockedReason(in Input) string {
 // CanCrossNode is §3.1 steps 1–3: only S3 snapshots whose sync finished
 // (remote_status=ready) may leave the origin.
 func CanCrossNode(backend, remoteStatus string) bool {
-	normalized, err := constants.NormalizeSnapshotBackend(backend)
-	if err != nil || !strings.EqualFold(normalized, constants.SnapshotBackendS3) {
+	if !constants.IsS3Backend(backend) {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(remoteStatus), constants.RemoteStatusReady)

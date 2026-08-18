@@ -76,6 +76,14 @@ func (e *Engine) ListSnapshots(string, uint64, string) (*ListSnapshotsResult, er
 	return nil, fmt.Errorf(nativeBuildHint)
 }
 
+func (e *Engine) ExportSnapshot(string) (string, error) {
+	return "", fmt.Errorf(nativeBuildHint)
+}
+
+func (e *Engine) ImportLvol(string, string) (string, error) {
+	return "", fmt.Errorf(nativeBuildHint)
+}
+
 func (e *Engine) GetMetrics() (map[string]uint64, error) {
 	return nil, fmt.Errorf(nativeBuildHint)
 }

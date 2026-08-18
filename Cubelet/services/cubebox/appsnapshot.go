@@ -451,6 +451,16 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, err)
 	}
 
+	if raw, err := uploadRemoteUUIDsIfS3(ctx, backend, templateID); err != nil {
+		os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
+		cleanupSnapshotObjects()
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to export snapshot: %v", err)
+		return rsp, nil
+	} else {
+		rsp.RemoteUuids = raw
+	}
+
 	stepLog.Infof("AppSnapshot completed successfully: snapshotPath=%s", snapshotPath)
 	rsp.Ret.RetMsg = "success"
 	return rsp, nil

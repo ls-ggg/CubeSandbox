@@ -210,6 +210,9 @@ const (
 	// MasterAnnotationStorageBackend is the CoW backend Master passes on
 	// Pause / Commit (xfs｜s3). Empty means xfs.
 	MasterAnnotationStorageBackend = "cube.master.storage.backend"
+	// MasterAnnotationSnapshotRemoteUUIDs is the JSON blob of remote
+	// volume uuids (rootfs/memory/metadata) for cubecow_import_lvol.
+	MasterAnnotationSnapshotRemoteUUIDs = "cube.master.snapshot.remote_uuids"
 	// MasterAnnotationDesiredSandboxID asks createid to use this sandbox ID
 	// instead of generating a new one (Resume-from-pause / same-ID recreate).
 	MasterAnnotationDesiredSandboxID = "cube.master.desired.sandbox.id"

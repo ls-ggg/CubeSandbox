@@ -15,12 +15,15 @@ const (
 	// SnapshotBackendS3 is the cluster-shared S3 backend.
 	SnapshotBackendS3 = "s3"
 
-	// RemoteStatus* are S3 sync states stored on snapshot / pause-snapshot
-	// rows. Empty on xfs (remote_status is S3-only).
-	RemoteStatusPending = "pending"
-	RemoteStatusRunning = "running"
-	RemoteStatusReady   = "ready"
-	RemoteStatusFailed  = "failed"
+	// RemoteStatus* are S3 upload states on snapshot / pause-snapshot rows.
+	// Empty on xfs (remote_status is S3-only). Create starts pending; after
+	// Pause／Commit persist uuids the row becomes inprogress; a background
+	// loop queries Cubelet Status and writes ready／failed.
+	RemoteStatusPending    = "pending"
+	RemoteStatusInProgress = "inprogress"
+	RemoteStatusRunning    = "running"
+	RemoteStatusReady      = "ready"
+	RemoteStatusFailed     = "failed"
 )
 
 // NormalizeSnapshotBackend maps create/pause backend input onto xfs | s3.
@@ -62,10 +65,17 @@ func OptionalSnapshotBackend(values ...string) (string, bool, error) {
 	return "", false, nil
 }
 
+// IsS3Backend reports whether backend is the cluster-shared S3 store.
+// Empty / cubecow aliases are xfs and return false.
+func IsS3Backend(backend string) bool {
+	normalized, err := NormalizeSnapshotBackend(backend)
+	return err == nil && normalized == SnapshotBackendS3
+}
+
 // SnapshotRemoteStatus returns the default remote_status for a normalized
 // backend. S3 starts pending; xfs leaves the column empty.
 func SnapshotRemoteStatus(backend string) string {
-	if strings.EqualFold(strings.TrimSpace(backend), SnapshotBackendS3) {
+	if IsS3Backend(backend) {
 		return RemoteStatusPending
 	}
 	return ""

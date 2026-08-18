@@ -20,19 +20,20 @@ import (
 // intentionally left untouched; do not merge mock-S3 logic back into it.
 //
 // create/activate/delete/list currently behave like XFS via the shared cubecow
-// engine. Sync/SyncStatus/Restore are mocks until a real remote backend exists
-// (Restore only activates objects that are already local).
+// engine. Upload/Fetch/Activate map to cubecow_export_snapshot /
+// cubecow_import_lvol / cubecow_activate_volume (upload is mocked while the
+// linked cubecow is still reflink).
 type S3Cow struct {
 	engine cowEngine
 
-	syncLock   sync.Mutex
-	syncStates map[string]s3SyncEntry // snapshotID → mock sync state
+	uploadLock   sync.Mutex
+	uploadStates map[string]s3UploadEntry // snapshotID → remote uuids / state
 }
 
 func newS3CowVolumeManager(engine *cubecow.Engine) *S3Cow {
 	return &S3Cow{
-		engine:     engine,
-		syncStates: make(map[string]s3SyncEntry),
+		engine:       engine,
+		uploadStates: make(map[string]s3UploadEntry),
 	}
 }
 

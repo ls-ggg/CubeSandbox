@@ -400,6 +400,12 @@ func TestRunSnapshotCreateJobWritesThinReplica(t *testing.T) {
 		return nil
 	})
 	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, templateID string, fields map[string]any) error {
+		if _, ok := fields["export_uuids"]; ok {
+			t.Fatal("xfs snapshot must not persist export_uuids")
+		}
+		if _, ok := fields["remote_status"]; ok {
+			t.Fatal("xfs snapshot must not persist remote_status")
+		}
 		if status, ok := fields["status"].(string); ok && status == StatusReady {
 			readyTemplate = true
 		}
@@ -440,6 +446,55 @@ func TestRunSnapshotCreateJobWritesThinReplica(t *testing.T) {
 	// regressions cannot even compile. Verify control-plane identity only.
 	if upserted.NodeID != "node-a" || upserted.NodeIP != "10.0.0.1" {
 		t.Fatalf("snapshot replica must carry node identity, got %+v", upserted)
+	}
+}
+
+func TestRunSnapshotCreateJobPersistsS3RemoteUUIDs(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	var persisted map[string]any
+	patches.ApplyFunc(cubelet.CommitSandbox, func(ctx context.Context, calleeEp string, req *cubeboxv1.CommitSandboxRequest) (*cubeboxv1.CommitSandboxResponse, error) {
+		return &cubeboxv1.CommitSandboxResponse{
+			Ret:         &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success},
+			RemoteUuids: `{"rootfs":"r1","memory":"m1"}`,
+		}, nil
+	})
+	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP })
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendS3}, nil
+	})
+	patches.ApplyFunc(UpsertReplica, func(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
+		return nil
+	})
+	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, templateID string, fields map[string]any) error {
+		persisted = fields
+		return nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error { return nil })
+	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
+	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error { return nil })
+	patches.ApplyFunc(registerTemplateReplicaForSnapshot, func(templateID, nodeID string, sizeBytes int64) {})
+
+	if err := runSnapshotCreateJob(context.Background(), "job-1", "sb-1", "node-a", "10.0.0.1", &sandboxtypes.CreateCubeSandboxReq{
+		Backend:      constants.SnapshotBackendS3,
+		InstanceType: "cubebox",
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateID: "snap-1",
+		},
+	}, &sandboxtypes.CreateCubeSandboxReq{
+		Request: &sandboxtypes.Request{RequestID: "req-1"},
+	}); err != nil {
+		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
+	}
+	if persisted == nil {
+		t.Fatal("expected updateSnapshotFields")
+	}
+	if persisted["export_uuids"] != `{"rootfs":"r1","memory":"m1"}` {
+		t.Fatalf("export_uuids=%v", persisted["export_uuids"])
+	}
+	if persisted["remote_status"] != constants.RemoteStatusInProgress {
+		t.Fatalf("remote_status=%v", persisted["remote_status"])
 	}
 }
 

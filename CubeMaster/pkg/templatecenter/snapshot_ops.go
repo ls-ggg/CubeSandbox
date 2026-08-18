@@ -363,11 +363,20 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	if cacheErr := setTemplateRequestCache(snapshotID, storedReq); cacheErr != nil {
 		logger.Warnf("set snapshot request cache failed: %v", cacheErr)
 	}
-	if err := updateSnapshotFields(ctx, snapshotID, map[string]any{
+	snapUpdates := map[string]any{
 		"status":                        StatusReady,
 		"last_error":                    "",
 		"rootfs_size_bytes_at_snapshot": commitRsp.GetRootfsSizeBytes(),
-	}); err != nil {
+	}
+	if constants.IsS3Backend(commitBackend) {
+		raw := strings.TrimSpace(commitRsp.GetRemoteUuids())
+		if raw == "" {
+			return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, errors.New("s3 commit returned empty remote_uuids"), commitBackend)
+		}
+		snapUpdates["export_uuids"] = raw
+		snapUpdates["remote_status"] = constants.RemoteStatusInProgress
+	}
+	if err := updateSnapshotFields(ctx, snapshotID, snapUpdates); err != nil {
 		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)
 	}
 	// Commit yields a single authoritative envd version; persist it (best-effort)

@@ -405,7 +405,7 @@ func assertHeadSchema(t *testing.T, db *sql.DB) {
 			table: "t_cube_snapshot",
 			columns: []string{
 				"snapshot_id", "origin_sandbox_id", "origin_node_id",
-				"backend", "remote_status", "request_json",
+				"backend", "remote_status", "request_json", "export_uuids",
 			},
 			indexes: []string{
 				"uniq_cube_snapshot_id",
@@ -418,6 +418,7 @@ func assertHeadSchema(t *testing.T, db *sql.DB) {
 			columns: []string{
 				"snapshot_id", "sandbox_id", "node_id", "node_ip",
 				"backend", "remote_status", "origin_host_facts_json",
+				"export_uuids",
 			},
 			indexes: []string{
 				"uniq_pause_snapshot_id",

@@ -28,6 +28,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/remotestatus"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox"
 	sandboxtypes "github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
@@ -266,6 +267,7 @@ func Init(ctx context.Context) error {
 			log.G(ctx).Warnf("warm ready template locality fail:%v", warmErr)
 		}
 		startSnapshotReconciler(ctx)
+		remotestatus.Start(ctx, store.db)
 		startArtifactGC(ctx)
 		scheduleInitialCompatScan(ctx)
 	})

@@ -80,6 +80,9 @@ const (
 	// CubeAnnotationStorageBackend is the CoW backend Master passes to Cubelet
 	// on Pause / Commit (xfs｜s3). Empty means xfs.
 	CubeAnnotationStorageBackend = "cube.master.storage.backend"
+	// CubeAnnotationSnapshotRemoteUUIDs is the JSON blob of remote
+	// volume uuids (rootfs/memory/metadata) for cubecow_import_lvol.
+	CubeAnnotationSnapshotRemoteUUIDs = "cube.master.snapshot.remote_uuids"
 	// CubeAnnotationSnapshotAllowNonLocal lets the scheduler pick a node that
 	// does not already hold a local replica. Set on S3 remote_ready cross-node
 	// from-snapshot Create. Value is the literal "true".

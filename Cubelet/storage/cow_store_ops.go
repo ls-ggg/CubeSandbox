@@ -43,23 +43,45 @@ func requireCowStoreFor(backend string) (cow.Store, error) {
 	return store, nil
 }
 
-// SyncSnapshot triggers a mock/real remote sync for snapshotID on the S3 Store.
-// backend must normalize to s3; XFS returns an error (no remote sync).
-func SyncSnapshot(ctx context.Context, backend, snapshotID string) error {
-	syncer, err := requireCowSyncer(backend)
-	if err != nil {
-		return err
-	}
-	return syncer.Sync(ctx, snapshotID)
-}
-
-// SnapshotSyncStatus returns the sync state for snapshotID on the S3 Store.
-func SnapshotSyncStatus(ctx context.Context, backend, snapshotID string) (*cow.SyncStatus, error) {
-	syncer, err := requireCowSyncer(backend)
+// UploadSnapshot publishes snapshot disks to the remote store
+// (cubecow_export_snapshot). XFS is a successful no-op (no remote upload).
+func UploadSnapshot(ctx context.Context, backend, snapshotID string) (*cow.RemoteUUIDs, error) {
+	uploader, err := requireCowUploader(backend)
 	if err != nil {
 		return nil, err
 	}
-	return syncer.SyncStatus(ctx, snapshotID)
+	return uploader.Upload(ctx, snapshotID)
+}
+
+// SnapshotUploadStatus returns upload state. S3 is mocked ready until
+// cubecow_get_volume_info reports upload.
+func SnapshotUploadStatus(ctx context.Context, backend, snapshotID string) (*cow.RemoteStatus, error) {
+	uploader, err := requireCowUploader(backend)
+	if err != nil {
+		return nil, err
+	}
+	return uploader.UploadStatus(ctx, snapshotID)
+}
+
+// FetchSnapshot materializes remote_uuids (cubecow_import_lvol).
+// activate=true opens the block device after fetch.
+func FetchSnapshot(ctx context.Context, backend, snapshotID string, uuids *cow.RemoteUUIDs, activate bool) error {
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return err
+	}
+	if normalized != cow.BackendS3 {
+		return nil
+	}
+	store, err := requireCowStoreFor(cow.BackendS3)
+	if err != nil {
+		return err
+	}
+	fetcher, ok := store.(cow.Fetcher)
+	if !ok || fetcher == nil {
+		return fmt.Errorf("s3 cow store does not implement fetch")
+	}
+	return fetcher.Fetch(ctx, snapshotID, uuids, activate)
 }
 
 // ActivateSnapshot opens a local snapshot's cubecow objects on the Store
@@ -79,39 +101,37 @@ func RestoreSnapshot(ctx context.Context, backend, snapshotID string) error {
 	return ActivateSnapshot(ctx, backend, snapshotID)
 }
 
-type noopSyncer struct{}
+type noopUploader struct{}
 
-func (noopSyncer) Sync(ctx context.Context, snapshotID string) error {
+func (noopUploader) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs, error) {
 	_ = ctx
 	_ = snapshotID
-	return nil
+	return &cow.RemoteUUIDs{}, nil
 }
 
-func (noopSyncer) SyncStatus(ctx context.Context, snapshotID string) (*cow.SyncStatus, error) {
+func (noopUploader) UploadStatus(ctx context.Context, snapshotID string) (*cow.RemoteStatus, error) {
 	_ = ctx
 	id := strings.TrimSpace(snapshotID)
-	return &cow.SyncStatus{SnapshotID: id, State: cow.SyncStateReady, Message: "xfs sync mocked"}, nil
+	return &cow.RemoteStatus{SnapshotID: id, State: cow.RemoteStateReady, Message: "xfs has no remote upload"}, nil
 }
 
-func requireCowSyncer(backend string) (cow.Syncer, error) {
+func requireCowUploader(backend string) (cow.Uploader, error) {
 	normalized, err := cow.NormalizeBackend(backend)
 	if err != nil {
 		return nil, err
 	}
 	if normalized != cow.BackendS3 {
-		// XFS has no remote object store; mock success so callers that
-		// probe sync (e2e / upload jobs) do not fail the local path.
-		return noopSyncer{}, nil
+		return noopUploader{}, nil
 	}
 	store, err := requireCowStoreFor(cow.BackendS3)
 	if err != nil {
 		return nil, err
 	}
-	syncer, ok := store.(cow.Syncer)
-	if !ok || syncer == nil {
-		return nil, fmt.Errorf("s3 cow store does not implement sync")
+	uploader, ok := store.(cow.Uploader)
+	if !ok || uploader == nil {
+		return nil, fmt.Errorf("s3 cow store does not implement upload")
 	}
-	return syncer, nil
+	return uploader, nil
 }
 
 func requireCowActivator(backend string) (cow.Activator, error) {

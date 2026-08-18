@@ -59,24 +59,30 @@ func TestCommitRootfsForUsesS3Store(t *testing.T) {
 	require.Equal(t, [][2]string{{"sb-1-rootfs-gen0", "tpl-snap-s3-rootfs"}}, engine.createSnapshots)
 }
 
-func TestSyncSnapshotMockReady(t *testing.T) {
+func TestUploadSnapshotMockReady(t *testing.T) {
 	useTestCowStorage(t, &fakeCowEngine{})
 
-	st, err := SnapshotSyncStatus(context.Background(), cow.BackendS3, "snap-1")
+	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
-	require.Equal(t, cow.SyncStatePending, st.State)
+	require.Equal(t, cow.RemoteStateReady, st.State)
 
-	require.NoError(t, SyncSnapshot(context.Background(), cow.BackendS3, "snap-1"))
-	st, err = SnapshotSyncStatus(context.Background(), cow.BackendS3, "snap-1")
+	uuids, err := UploadSnapshot(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
-	require.Equal(t, cow.SyncStateReady, st.State)
+	require.False(t, uuids.Empty())
+	require.NotEmpty(t, uuids.Rootfs)
+	require.NotEmpty(t, uuids.Memory)
+
+	st, err = SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.RemoteStateReady, st.State)
 	require.Equal(t, "snap-1", st.SnapshotID)
+	require.Equal(t, uuids.Rootfs, st.RemoteUUIDs.Rootfs)
 
-	// XFS has no remote store; sync is a successful no-op so callers do not fail.
-	require.NoError(t, SyncSnapshot(context.Background(), cow.BackendXFS, "snap-1"))
-	st, err = SnapshotSyncStatus(context.Background(), cow.BackendXFS, "snap-1")
+	_, err = UploadSnapshot(context.Background(), cow.BackendXFS, "snap-1")
 	require.NoError(t, err)
-	require.Equal(t, cow.SyncStateReady, st.State)
+	st, err = SnapshotUploadStatus(context.Background(), cow.BackendXFS, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.RemoteStateReady, st.State)
 }
 
 func TestActivateSnapshotActivatesLocalObjects(t *testing.T) {

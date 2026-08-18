@@ -17,7 +17,7 @@ pub mod reflink;
 
 use std::collections::HashMap;
 
-use crate::pkg::errors::CubecowResult;
+use crate::pkg::errors::{CubecowError, CubecowResult};
 use crate::{Snapshot, Volume, VolumeBlockInfo};
 
 /// Backend-agnostic interface for the cubecow storage engine.
@@ -95,6 +95,24 @@ pub trait Engine: Send + Sync {
 
     /// Deactivate a volume or snapshot by name. Idempotent.
     fn deactivate_volume(&self, name: &str) -> CubecowResult<()>;
+
+    // -----------------------------------------------------------------------
+    // Cross-node export / import (optional; backend-specific)
+    // -----------------------------------------------------------------------
+
+    /// Publish a snapshot for cross-node recovery. Returns an opaque export_uuid.
+    fn export_snapshot(&self, _snapshot_name: &str) -> CubecowResult<String> {
+        Err(CubecowError::PreconditionFailed(
+            "export_snapshot is not implemented by this backend".to_string(),
+        ))
+    }
+
+    /// Import a writable volume from an export_uuid produced by a remote node.
+    fn import_lvol(&self, _lvol_name: &str, _export_uuid: &str) -> CubecowResult<Volume> {
+        Err(CubecowError::PreconditionFailed(
+            "import_lvol is not implemented by this backend".to_string(),
+        ))
+    }
 
     // -----------------------------------------------------------------------
     // Node operations

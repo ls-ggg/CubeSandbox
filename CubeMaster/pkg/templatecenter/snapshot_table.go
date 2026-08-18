@@ -158,6 +158,7 @@ type RestoreSource struct {
 	OriginNodeIP        string
 	OriginHostFactsJSON string
 	InstanceType        string
+	ExportUUIDs         string
 }
 
 // GetSnapshotRestoreSource loads backend, remote_status, origin node and
@@ -175,5 +176,6 @@ func GetSnapshotRestoreSource(ctx context.Context, snapshotID string) (*RestoreS
 		OriginNodeIP:        rec.OriginNodeIP,
 		OriginHostFactsJSON: rec.OriginHostFactsJSON,
 		InstanceType:        rec.InstanceType,
+		ExportUUIDs:         rec.ExportUUIDs,
 	}, nil
 }

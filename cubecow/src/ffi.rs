@@ -993,6 +993,73 @@ pub extern "C" fn cubecow_list_snapshots(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-node export / import
+// ---------------------------------------------------------------------------
+
+/// Publish a snapshot for cross-node recovery. Writes the opaque
+/// `export_uuid` to `out_export_uuid` (caller frees).
+#[no_mangle]
+pub extern "C" fn cubecow_export_snapshot(
+    engine: *mut std::ffi::c_void,
+    snapshot_name: *const c_char,
+    out_export_uuid: *mut *mut c_char,
+) -> i32 {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let eng = unsafe { engine_ref(engine) }?;
+        let snap = unsafe { c_str_to_str(snapshot_name) }?;
+        match eng.export_snapshot(snap) {
+            Ok(uuid) => {
+                if !out_export_uuid.is_null() {
+                    unsafe { *out_export_uuid = rust_string_to_c(&uuid) };
+                }
+                Ok(COW_OK)
+            }
+            Err(e) => Err(handle_cow_error(&e)),
+        }
+    }));
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(code)) => code,
+        Err(_) => {
+            set_last_error("panic during cubecow_export_snapshot");
+            COW_ERR_PANIC
+        }
+    }
+}
+
+/// Instantiate a writable volume from a remote `export_uuid`.
+#[no_mangle]
+pub extern "C" fn cubecow_import_lvol(
+    engine: *mut std::ffi::c_void,
+    lvol_name: *const c_char,
+    export_uuid: *const c_char,
+    out_device_path: *mut *mut c_char,
+) -> i32 {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let eng = unsafe { engine_ref(engine) }?;
+        let name = unsafe { c_str_to_str(lvol_name) }?;
+        let uuid = unsafe { c_str_to_str(export_uuid) }?;
+        match eng.import_lvol(name, uuid) {
+            Ok(vol) => {
+                if !out_device_path.is_null() {
+                    unsafe { *out_device_path = rust_string_to_c(&vol.device_path) };
+                }
+                Ok(COW_OK)
+            }
+            Err(e) => Err(handle_cow_error(&e)),
+        }
+    }));
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(code)) => code,
+        Err(_) => {
+            set_last_error("panic during cubecow_import_lvol");
+            COW_ERR_PANIC
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
 

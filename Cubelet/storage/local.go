@@ -1220,6 +1220,11 @@ func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.Creat
 	if err != nil {
 		return nil, err
 	}
+	if uuids := remoteUUIDsFromCreateContext(opts); !uuids.Empty() && backend == cow.BackendS3 {
+		if err := FetchSnapshot(ctx, backend, templateID, uuids, true); err != nil {
+			return nil, err
+		}
+	}
 	if opts != nil && opts.IsPauseResume() {
 		if err := activateStoreObjects(ctx, store, backend, templateID); err != nil {
 			return nil, err
@@ -1227,6 +1232,14 @@ func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.Creat
 		return attachExistingSnapshotRootfs(ctx, store, backend, templateID)
 	}
 	return store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
+}
+
+func remoteUUIDsFromCreateContext(opts *workflow.CreateContext) *cow.RemoteUUIDs {
+	if opts == nil || opts.ReqInfo == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(opts.ReqInfo.GetAnnotations()[constants.MasterAnnotationSnapshotRemoteUUIDs])
+	return cow.ParseRemoteUUIDs(raw)
 }
 
 func attachExistingSnapshotRootfs(ctx context.Context, store cow.Store, backend, snapshotID string) (*cowVolume, error) {

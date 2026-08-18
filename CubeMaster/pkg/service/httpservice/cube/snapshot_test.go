@@ -367,6 +367,7 @@ func TestBindSnapshotCreateReplicaCrossNodeWhenOriginCannotSchedule(t *testing.T
 			OriginNodeIP:        "10.0.0.1",
 			OriginHostFactsJSON: `{"cpuid_hash":"sha256:cpu","host_kernel_release":"5.15.0"}`,
 			InstanceType:        "cubebox",
+			ExportUUIDs:         `{"rootfs":"r1","memory":"m1"}`,
 		}, nil
 	}
 	decideRestorePlacementFn = func(ctx context.Context, in restoreplace.Input) (*restoreplace.Placement, error) {
@@ -387,6 +388,7 @@ func TestBindSnapshotCreateReplicaCrossNodeWhenOriginCannotSchedule(t *testing.T
 	assert.Equal(t, []string{"node-b"}, req.DistributionScope)
 	assert.Equal(t, "true", req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
 	assert.Equal(t, constants.SnapshotBackendS3, req.Annotations[constants.CubeAnnotationStorageBackend])
+	assert.Equal(t, `{"rootfs":"r1","memory":"m1"}`, req.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs])
 	assert.Equal(t, "snap-1", req.Annotations[constants.CubeAnnotationRuntimeSnapshotID])
 }
 
@@ -406,6 +408,7 @@ func TestBindSnapshotCreateReplicaKeepsOriginWhenPlacementSaysOrigin(t *testing.
 			RemoteStatus: constants.RemoteStatusReady,
 			OriginNodeID: "node-a",
 			OriginNodeIP: "10.0.0.1",
+			ExportUUIDs:  `{"rootfs":"r1"}`,
 		}, nil
 	}
 	decideRestorePlacementFn = func(ctx context.Context, in restoreplace.Input) (*restoreplace.Placement, error) {
@@ -422,6 +425,40 @@ func TestBindSnapshotCreateReplicaKeepsOriginWhenPlacementSaysOrigin(t *testing.
 		t.Fatalf("bindSnapshotCreateReplica failed: %v", err)
 	}
 	assert.Equal(t, []string{"node-a"}, req.DistributionScope)
+	assert.Empty(t, req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
+	assert.Equal(t, `{"rootfs":"r1"}`, req.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs])
+}
+
+func TestBindSnapshotCreateReplicaXFSIgnoresExportUUIDs(t *testing.T) {
+	origSource := getSnapshotRestoreSourceFn
+	origDecide := decideRestorePlacementFn
+	origReplica := resolveSnapshotReadyReplicaFn
+	t.Cleanup(func() {
+		getSnapshotRestoreSourceFn = origSource
+		decideRestorePlacementFn = origDecide
+		resolveSnapshotReadyReplicaFn = origReplica
+	})
+	getSnapshotRestoreSourceFn = func(ctx context.Context, snapshotID string) (*templatecenter.RestoreSource, error) {
+		return &templatecenter.RestoreSource{
+			SnapshotID:   snapshotID,
+			Backend:      constants.SnapshotBackendXFS,
+			OriginNodeID: "node-a",
+			OriginNodeIP: "10.0.0.1",
+			ExportUUIDs:  `{"rootfs":"should-not-propagate"}`,
+		}, nil
+	}
+	decideRestorePlacementFn = func(ctx context.Context, in restoreplace.Input) (*restoreplace.Placement, error) {
+		return &restoreplace.Placement{NodeID: "node-a", NodeIP: "10.0.0.1", CrossNode: false}, nil
+	}
+	resolveSnapshotReadyReplicaFn = func(ctx context.Context, snapshotID, preferredNodeID string) (templatecenter.ReplicaStatus, error) {
+		return templatecenter.ReplicaStatus{NodeID: "node-a"}, nil
+	}
+
+	req := &types.CreateCubeSandboxReq{Annotations: map[string]string{}}
+	if err := bindSnapshotCreateReplica(context.Background(), "snap-1", req); err != nil {
+		t.Fatalf("bindSnapshotCreateReplica failed: %v", err)
+	}
+	assert.Empty(t, req.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs])
 	assert.Empty(t, req.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal])
 }
 

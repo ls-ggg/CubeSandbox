@@ -763,6 +763,9 @@ message UpdateCubeSandboxResponse {
   // Same shape as DestroyCubeSandboxResponse.ext_info. Pause returns volume
   // ref-count events after in-process keep_tombstone cleanup.
   map<string, bytes> ext_info = 3;
+  // S3 Pause: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata).
+  // Filled before this RPC returns. Empty on xfs.
+  string remote_uuids = 4;
 }
 
 // IDMapping describes host to container ID mappings for a pod sandbox.
@@ -854,6 +857,9 @@ message AppSnapshotResponse {
   string envd_version = 14;
   // cube-shim (and sibling cube-runtime) version bound when this snapshot was created.
   string shim_version = 15;
+  // S3: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata).
+  // Filled before this RPC returns. Empty on xfs.
+  string remote_uuids = 16;
 }
 
 message CommitSandboxRequest {
@@ -904,6 +910,9 @@ message CommitSandboxResponse {
   string envd_version = 16;
   // cube-shim (and sibling cube-runtime) version bound when this snapshot was created.
   string shim_version = 17;
+  // S3: cubecow_export_snapshot uuids JSON (rootfs/memory/metadata).
+  // Filled before this RPC returns. Empty on xfs.
+  string remote_uuids = 18;
 }
 
 message RollbackSandboxRequest {

@@ -287,12 +287,20 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
 		ComponentVersions: cloneStringMap(cb.ComponentVersions),
 		Kind:              storage.CatalogKindRuntimeSnapshot,
+		Backend:           backend,
 	}); err != nil {
 		// Catalog write failures do not invalidate the snapshot: master will
 		// still receive the physical references in the response and rollback
 		// path keeps the legacy fallback. Log loudly so operators notice
 		// drift between master and cubelet local view.
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, err)
+	}
+	if raw, err := uploadRemoteUUIDsIfS3(ctx, backend, rsp.TemplateID); err != nil {
+		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+		rsp.Ret.RetMsg = fmt.Sprintf("failed to export snapshot: %v", err)
+		return rsp, nil
+	} else {
+		rsp.RemoteUuids = raw
 	}
 	// Persist the runtime-snapshot binding update we did in-memory after
 	// cube-runtime returned. Mirrors the rollback flow's SyncByID call so

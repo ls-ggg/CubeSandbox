@@ -30,6 +30,7 @@ type SnapshotRecord struct {
 	RequestJSON               string `json:"request_json" gorm:"column:request_json"`
 	Backend                   string `json:"backend" gorm:"column:backend"`
 	RemoteStatus              string `json:"remote_status" gorm:"column:remote_status"`
+	ExportUUIDs               string `json:"export_uuids" gorm:"column:export_uuids"`
 }
 
 func (SnapshotRecord) TableName() string {
@@ -53,6 +54,7 @@ type PauseSnapshotRecord struct {
 	Backend             string    `json:"backend" gorm:"column:backend"`
 	RemoteStatus        string    `json:"remote_status" gorm:"column:remote_status"`
 	OriginHostFactsJSON string    `json:"origin_host_facts_json" gorm:"column:origin_host_facts_json"`
+	ExportUUIDs         string    `json:"export_uuids" gorm:"column:export_uuids"`
 }
 
 func (PauseSnapshotRecord) TableName() string {

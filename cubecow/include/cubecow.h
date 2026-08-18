@@ -259,6 +259,39 @@ int32_t cubecow_list_snapshots(
     char** out_next_page_token);
 
 /* ------------------------------------------------------------------ */
+/* Cross-node export / import                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Publish a snapshot volume for cross-node use.
+ *
+ * On success writes an opaque export_uuid to out_export_uuid (caller
+ * frees with cubecow_free_string). Upload progress will come from
+ * cubecow_get_volume_info; Cubelet Status mocks ready until that field
+ * exists. Backends that do not support cross-node return
+ * COW_ERR_PRECONDITION_FAILED.
+ */
+int32_t cubecow_export_snapshot(
+    CubecowEngineHandle engine,
+    const char* snapshot_name,
+    char** out_export_uuid);
+
+/*
+ * Instantiate a writable volume from an export_uuid produced by a
+ * remote cubecow_export_snapshot(). The imported name is a normal
+ * volume (has a block device after activate). Import may leave the
+ * device inactive; pass activate via a follow-up cubecow_activate_volume
+ * or let the backend activate as part of import.
+ *
+ * Backends that do not support cross-node return COW_ERR_PRECONDITION_FAILED.
+ */
+int32_t cubecow_import_lvol(
+    CubecowEngineHandle engine,
+    const char* lvol_name,
+    const char* export_uuid,
+    char** out_device_path);
+
+/* ------------------------------------------------------------------ */
 /* Observability                                                       */
 /* ------------------------------------------------------------------ */
 

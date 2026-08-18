@@ -76,6 +76,7 @@ type Record struct {
 	Backend             string
 	RemoteStatus        string
 	OriginHostFactsJSON string
+	ExportUUIDs         string
 }
 
 // Begin allocates snapshotID and inserts a CREATING pause binding.
@@ -118,7 +119,9 @@ func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType, backend
 }
 
 // Complete marks the pause snapshot READY and records the node + plugin volumes.
-func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instanceType string, pluginVolumeIDs []string) error {
+// S3 export_uuids move remote_status to inprogress; CubeMaster does not query
+// Cubelet here — a background loop writes ready／failed later.
+func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instanceType string, pluginVolumeIDs []string, exportUUIDs string) error {
 	client := getDB()
 	if client == nil {
 		return ErrNotReady
@@ -140,6 +143,11 @@ func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instan
 	}
 	if raw, err := json.Marshal(uniqueNonEmpty(pluginVolumeIDs)); err == nil {
 		updates["plugin_volume_ids"] = string(raw)
+	}
+	if raw := strings.TrimSpace(exportUUIDs); raw != "" {
+		// Cross-node ids are S3-only; xfs callers must pass empty.
+		updates["export_uuids"] = raw
+		updates["remote_status"] = constants.RemoteStatusInProgress
 	}
 	res := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
 		Where("snapshot_id = ? AND sandbox_id = ?", snapshotID, sandboxID).
@@ -271,6 +279,7 @@ func recordFromModel(row *models.PauseSnapshotRecord) *Record {
 		Backend:             row.Backend,
 		RemoteStatus:        row.RemoteStatus,
 		OriginHostFactsJSON: row.OriginHostFactsJSON,
+		ExportUUIDs:         row.ExportUUIDs,
 	}
 }
 

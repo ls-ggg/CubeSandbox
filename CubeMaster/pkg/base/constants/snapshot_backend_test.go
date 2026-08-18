@@ -77,3 +77,13 @@ func TestSnapshotRemoteStatus(t *testing.T) {
 		t.Fatalf("xfs remote_status=%q, want empty", got)
 	}
 }
+
+func TestIsS3Backend(t *testing.T) {
+	t.Parallel()
+	if !IsS3Backend("s3") || !IsS3Backend("S3") {
+		t.Fatal("s3 must be IsS3Backend")
+	}
+	if IsS3Backend("") || IsS3Backend("xfs") || IsS3Backend("cubecow") || IsS3Backend("nfs") {
+		t.Fatal("non-s3 must not be IsS3Backend")
+	}
+}
