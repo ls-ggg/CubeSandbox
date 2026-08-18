@@ -194,13 +194,17 @@ func (s *service) updateWithPauseCow(
 
 	var rootfsObject *storage.CowSnapshotObject
 	cleanupArtifacts := func() {
+		layout.releaseMetadata(ctx)
 		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+		layout.discardTmpDir()
+		if !layout.usesTmpRename() {
+			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+		}
 		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, snapID, backend)
 	}
 
-	_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-	if err := layout.ensureTmp(); err != nil {
+	layout.resetTmpDir()
+	if err := layout.prepareWork(ctx); err != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create pause snapshot dir: %v", err)
@@ -314,9 +318,11 @@ func (s *service) updateWithPauseCow(
 	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to deactivate pause snapshot objects: %v", err))
 	}
-	_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
-	if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
-		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to move pause snapshot: %v", err))
+	if layout.usesTmpRename() {
+		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
+		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
+			return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to move pause snapshot: %v", err))
+		}
 	}
 	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to expose shim spec dir: %v", err))
@@ -332,12 +338,15 @@ func (s *service) updateWithPauseCow(
 		RootfsKind:      rootfsObject.Kind,
 		MemoryVol:       memoryObject.Name,
 		MemoryKind:      memoryObject.Kind,
+		MetadataVol:     storage.S3MetadataCatalogVol(backend, snapID),
+		MetadataKind:    storage.S3MetadataCatalogKind(backend),
 		RootfsSizeBytes: rootfsObject.SizeBytes,
 		Kind:            storage.CatalogKindPauseSnapshot,
 		Backend:         backend,
 	}); err != nil {
 		// catalog.json is required for Resume / List / cross-node; do not mark
 		// PAUSED without it (sandbox_spec / memory.dev already fail hard above).
+		_ = storage.UnmountS3Metadata(layout.MetaDir)
 		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to persist pause snapshot catalog for %s: %v", snapID, err))
@@ -359,12 +368,7 @@ func (s *service) updateWithPauseCow(
 	}
 	_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
 
-	remoteUUIDsJSON := ""
-	if raw, err := uploadRemoteUUIDsIfS3(workCtx, backend, snapID); err != nil {
-		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to export pause snapshot: %v", err))
-	} else {
-		remoteUUIDsJSON = raw
-	}
+	remoteUUIDsJSON := uploadRemoteUUIDsIfS3(workCtx, backend, snapID)
 
 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
@@ -389,7 +393,7 @@ func (s *service) updateWithPauseCow(
 	}
 	if prev := replacedLivePauseSnapshotID(prevLiveSnap, snapID); prev != "" {
 		stepLog.Infof("pause replaced live snap %s with %s; CleanupTemplate previous", prev, snapID)
-		s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev, cleanupBackendForPauseSnap(backend))
+		s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev, cleanupBackendForPauseSnap(backend, prev))
 	}
 	return rsp, nil
 }
@@ -537,31 +541,33 @@ func firstPauseSnapshotID(candidates []string, allowCatalogMiss bool, backend st
 	return ""
 }
 
-func lookupPauseCatalog(id, backend string) (*storage.SnapshotCatalogEntry, string) {
-	backend = strings.TrimSpace(backend)
-	if backend == "" {
-		backend = cow.BackendXFS
+func lookupPauseCatalog(id, preferred string) (*storage.SnapshotCatalogEntry, string) {
+	seen := map[string]struct{}{}
+	for _, backend := range []string{preferred, cow.BackendS3, cow.BackendXFS} {
+		backend = strings.TrimSpace(backend)
+		if backend == "" {
+			continue
+		}
+		if _, ok := seen[backend]; ok {
+			continue
+		}
+		seen[backend] = struct{}{}
+		entry, err := storage.GetLocalSnapshotFor(context.Background(), backend, id)
+		if err == nil && entry != nil {
+			return entry, backend
+		}
 	}
-	normalized, err := cow.NormalizeBackend(backend)
-	if err != nil {
-		return nil, backend
-	}
-	entry, err := storage.GetLocalSnapshotFor(context.Background(), normalized, id)
-	if err != nil || entry == nil {
-		return nil, normalized
-	}
-	return entry, normalized
+	return nil, preferred
 }
 
-func cleanupBackendForPauseSnap(preferred string) string {
-	if strings.TrimSpace(preferred) == "" {
-		return cow.BackendXFS
+func cleanupBackendForPauseSnap(preferred, snapID string) string {
+	if _, used := lookupPauseCatalog(snapID, preferred); strings.TrimSpace(used) != "" {
+		return used
 	}
-	normalized, err := cow.NormalizeBackend(preferred)
-	if err != nil {
-		return cow.BackendXFS
+	if strings.TrimSpace(preferred) != "" {
+		return preferred
 	}
-	return normalized
+	return cow.BackendXFS
 }
 
 // pauseSnapIDToGCOnDestroy is the Destroy-time pause-snap GC decision.

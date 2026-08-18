@@ -376,11 +376,15 @@ func runSnapshotCreateJob(ctx context.Context, jobID, sandboxID, nodeID, nodeIP 
 	}
 	if constants.IsS3Backend(commitBackend) {
 		raw := strings.TrimSpace(commitRsp.GetRemoteUuids())
-		if raw == "" {
-			return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, errors.New("s3 commit returned empty remote_uuids"), commitBackend)
+		if raw != "" {
+			snapUpdates["export_uuids"] = raw
+			snapUpdates["remote_status"] = constants.RemoteStatusInProgress
+		} else {
+			// Commit succeeded for the customer; export failed or returned
+			// empty — same-node restore still works, cross-node does not.
+			snapUpdates["export_uuids"] = ""
+			snapUpdates["remote_status"] = constants.RemoteStatusFailed
 		}
-		snapUpdates["export_uuids"] = raw
-		snapUpdates["remote_status"] = constants.RemoteStatusInProgress
 	}
 	if err := updateSnapshotFields(ctx, snapshotID, snapUpdates); err != nil {
 		return failSnapshotCreateJob(ctx, jobID, snapshotID, nodeIP, snapshotPath, commitRsp, err, commitBackend)

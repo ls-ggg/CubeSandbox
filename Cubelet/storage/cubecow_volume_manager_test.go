@@ -39,6 +39,9 @@ type fakeCowEngine struct {
 	resizedVolumes            map[string]uint64
 	metrics                   map[string]uint64
 	metricsErr                error
+	exportSnapshots           []string
+	exportUUIDPrefix          string
+	exportErr                 error
 }
 
 func (f *fakeCowEngine) CreateVolume(name string, sizeBytes uint64) (string, error) {
@@ -61,7 +64,28 @@ func (f *fakeCowEngine) CreateVolume(name string, sizeBytes uint64) (string, err
 func (f *fakeCowEngine) CreateSnapshot(sourceName, snapshotName string, activate bool) (string, error) {
 	f.createSnapshots = append(f.createSnapshots, [2]string{sourceName, snapshotName})
 	f.createSnapshotActivations = append(f.createSnapshotActivations, activate)
-	return f.createSnapshotPath, f.createSnapshotErr
+	if f.createSnapshotErr != nil {
+		return f.createSnapshotPath, f.createSnapshotErr
+	}
+	path := f.createSnapshotPath
+	if path == "" {
+		path = "/dev/mapper/" + snapshotName
+	}
+	if f.volumeInfos == nil {
+		f.volumeInfos = map[string]*cubecow.Volume{}
+	}
+	if _, ok := f.volumeInfos[snapshotName]; !ok {
+		f.volumeInfos[snapshotName] = &cubecow.Volume{DevicePath: path, SizeBytes: 8 << 20}
+	}
+	if f.listSnapshots == nil {
+		f.listSnapshots = map[string][]cubecow.Snapshot{}
+	}
+	f.listSnapshots[sourceName] = append(f.listSnapshots[sourceName], cubecow.Snapshot{
+		Name:         snapshotName,
+		OriginVolume: sourceName,
+		DevicePath:   path,
+	})
+	return path, nil
 }
 
 func (f *fakeCowEngine) ActivateVolume(name string) (string, error) {
@@ -151,6 +175,18 @@ func (f *fakeCowEngine) GetMetrics() (map[string]uint64, error) {
 		return map[string]uint64{}, nil
 	}
 	return f.metrics, nil
+}
+
+func (f *fakeCowEngine) ExportSnapshot(name string) (string, error) {
+	f.exportSnapshots = append(f.exportSnapshots, name)
+	if f.exportErr != nil {
+		return "", f.exportErr
+	}
+	prefix := f.exportUUIDPrefix
+	if prefix == "" {
+		prefix = "export-"
+	}
+	return prefix + name, nil
 }
 
 func stubInitDefaultMediumDevice(t *testing.T, fn func(string) error) {

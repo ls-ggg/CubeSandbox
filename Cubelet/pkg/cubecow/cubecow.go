@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 	"unsafe"
 )
 
@@ -193,23 +194,20 @@ func (e *Engine) GetVolumeInfo(name string) (*Volume, error) {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	var sizeBytes C.uint64_t
-	var cDevicePath *C.char
-	var snapCount C.int32_t
-	var cCreatedAt *C.char
-
-	rc := C.cubecow_get_volume_info(C.CubecowEngineHandle(ptr), cName, &sizeBytes, &cDevicePath, &snapCount, &cCreatedAt)
+	var cJSON *C.char
+	rc := C.cubecow_get_volume_info(C.CubecowEngineHandle(ptr), cName, &cJSON)
 	if rc != 0 {
 		return nil, makeError(rc)
 	}
-
-	return &Volume{
-		Name:          name,
-		SizeBytes:     uint64(sizeBytes),
-		DevicePath:    takeCString(cDevicePath),
-		SnapshotCount: int32(snapCount),
-		CreatedAt:     takeCString(cCreatedAt),
-	}, nil
+	raw := takeCString(cJSON)
+	var vol Volume
+	if err := json.Unmarshal([]byte(raw), &vol); err != nil {
+		return nil, fmt.Errorf("unmarshal cubecow_get_volume_info: %w", err)
+	}
+	if strings.TrimSpace(vol.Name) == "" {
+		vol.Name = name
+	}
+	return &vol, nil
 }
 
 func (e *Engine) GetVolumeBlockInfo(name string) (*VolumeBlockInfo, error) {

@@ -4,9 +4,9 @@
 
 // Package s3 holds the canonical backend name for the S3 CoW Store.
 //
-// The runtime mock type lives in package storage as [storage.S3Cow]: a copy of
-// the XFS/reflink Store path that shares the cubecow engine until a real remote
-// S3 backend exists. Do not put mock logic into [storage.XfsCow].
+// The runtime type lives in package storage as [storage.S3Cow], bound to the
+// cubecow kind=s3 handle. Cross-node Pause／Create use Upload／Fetch／Status
+// on that Store. Do not fold S3 export logic into [storage.XfsCow].
 package s3
 
 import "github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"

@@ -9,8 +9,8 @@
 // is the home for future xfscow-only helpers without pulling S3 concerns into
 // the storage facade.
 //
-// The S3 Store mock ([storage.S3Cow]) is a separate copy under the same
-// storage package; it coexists with XfsCow and is selected by request type.
+// The S3 Store ([storage.S3Cow]) coexists in the same storage package and is
+// selected by request backend type.
 package xfscow
 
 import "github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"

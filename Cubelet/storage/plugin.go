@@ -447,6 +447,11 @@ func init() {
 			SetSnapshotCatalogRootsFor(cow.BackendXFS, catalogKindRoots(cow.BackendXFS)...)
 			SetSnapshotCatalogRootsFor(cow.BackendS3, catalogKindRoots(cow.BackendS3)...)
 
+			if err := EnsureS3MetadataReady(ic.Context); err != nil {
+				CubeLog.Errorf("plugin %s s3 metadata base init fail:%v", constants.StorageID, err)
+				return nil, err
+			}
+
 			return localStorage, nil
 		},
 	})

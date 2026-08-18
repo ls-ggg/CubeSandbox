@@ -20,12 +20,7 @@ const (
 	// SnapshotKindPause is the on-disk directory for pause temporary snapshots.
 	SnapshotKindPause = "pause-snapshots"
 	// SnapshotMetadataDir holds catalog.json, sandbox_spec.json, hypervisor state.
-	// On S3 this directory is a cubecow volume of SnapshotMetadataVolumeSizeBytes.
 	SnapshotMetadataDir = "metadata"
-	// SnapshotMetadataVolumeSizeBytes is the S3 metadata volume size (8MiB).
-	// Used only for the first template create_volume + mkfs; later snapshots
-	// inherit size from create_snapshot of the parent metadata volume.
-	SnapshotMetadataVolumeSizeBytes = 8 << 20
 	// SnapshotMemoryDir holds S3 memory files (e.g. memory.dev).
 	SnapshotMemoryDir = "memory"
 	// SnapshotDiskDir holds S3 disk files (e.g. disk.dev).

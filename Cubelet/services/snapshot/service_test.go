@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	api "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/snapshot/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 func TestStatusXFSHasNoRemoteUpload(t *testing.T) {
@@ -25,15 +26,15 @@ func TestStatusXFSHasNoRemoteUpload(t *testing.T) {
 	if rsp.GetRemoteReady() {
 		t.Fatal("xfs must not be remote_ready")
 	}
-	if rsp.GetState() != "pending" {
+	if rsp.GetState() != cow.RemoteStatePending {
 		t.Fatalf("state=%q", rsp.GetState())
 	}
-	if rsp.GetBackend() != "xfs" {
+	if rsp.GetBackend() != cow.BackendXFS {
 		t.Fatalf("backend=%q", rsp.GetBackend())
 	}
 }
 
-func TestStatusS3MocksReadyForMaster(t *testing.T) {
+func TestStatusS3WithoutStoreReportsFailedOrPending(t *testing.T) {
 	t.Parallel()
 	s := &service{}
 	rsp, err := s.Status(context.Background(), &api.StatusRequest{
@@ -44,13 +45,14 @@ func TestStatusS3MocksReadyForMaster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rsp.GetBackend() != "s3" {
+	if rsp.GetBackend() != cow.BackendS3 {
 		t.Fatalf("backend=%q", rsp.GetBackend())
 	}
-	if rsp.GetState() != "ready" {
-		t.Fatalf("state=%q", rsp.GetState())
+	// Without an initialized S3 store the query fails closed.
+	if rsp.GetRemoteReady() {
+		t.Fatal("s3 without store must not be remote_ready")
 	}
-	if !rsp.GetRemoteReady() {
-		t.Fatal("s3 mock must be remote_ready")
+	if rsp.GetState() != cow.RemoteStateFailed && rsp.GetState() != cow.RemoteStatePending {
+		t.Fatalf("state=%q", rsp.GetState())
 	}
 }

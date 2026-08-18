@@ -7,6 +7,7 @@ package templatecenter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -495,6 +496,57 @@ func TestRunSnapshotCreateJobPersistsS3RemoteUUIDs(t *testing.T) {
 	}
 	if persisted["remote_status"] != constants.RemoteStatusInProgress {
 		t.Fatalf("remote_status=%v", persisted["remote_status"])
+	}
+}
+
+func TestRunSnapshotCreateJobEmptyRemoteUUIDsMarksFailedNotJobError(t *testing.T) {
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	var persisted map[string]any
+	patches.ApplyFunc(cubelet.CommitSandbox, func(ctx context.Context, calleeEp string, req *cubeboxv1.CommitSandboxRequest) (*cubeboxv1.CommitSandboxResponse, error) {
+		return &cubeboxv1.CommitSandboxResponse{
+			Ret: &errorcodev1.Ret{RetCode: errorcodev1.ErrorCode_Success},
+		}, nil
+	})
+	patches.ApplyFunc(cubelet.GetCubeletAddr, func(hostIP string) string { return hostIP })
+	patches.ApplyFunc(getSnapshotRecord, func(ctx context.Context, snapshotID string) (*models.SnapshotRecord, error) {
+		return &models.SnapshotRecord{SnapshotID: snapshotID, Backend: constants.SnapshotBackendS3}, nil
+	})
+	patches.ApplyFunc(UpsertReplica, func(ctx context.Context, templateID, instanceType string, replica ReplicaStatus) error {
+		return nil
+	})
+	patches.ApplyFunc(updateSnapshotFields, func(ctx context.Context, templateID string, fields map[string]any) error {
+		persisted = fields
+		return nil
+	})
+	patches.ApplyFunc(updateTemplateImageJob, func(ctx context.Context, jobID string, fields map[string]any) error { return nil })
+	patches.ApplyFunc(setTemplateLocalityCache, func(templateID string, replicas []ReplicaStatus) {})
+	patches.ApplyFunc(setTemplateRequestCache, func(templateID string, req *sandboxtypes.CreateCubeSandboxReq) error { return nil })
+	patches.ApplyFunc(registerTemplateReplicaForSnapshot, func(templateID, nodeID string, sizeBytes int64) {})
+
+	if err := runSnapshotCreateJob(context.Background(), "job-1", "sb-1", "node-a", "10.0.0.1", &sandboxtypes.CreateCubeSandboxReq{
+		Backend:      constants.SnapshotBackendS3,
+		InstanceType: "cubebox",
+		Annotations: map[string]string{
+			constants.CubeAnnotationAppSnapshotTemplateID: "snap-1",
+		},
+	}, &sandboxtypes.CreateCubeSandboxReq{
+		Request: &sandboxtypes.Request{RequestID: "req-1"},
+	}); err != nil {
+		t.Fatalf("runSnapshotCreateJob returned error: %v", err)
+	}
+	if persisted == nil {
+		t.Fatal("expected updateSnapshotFields")
+	}
+	if persisted["status"] != StatusReady {
+		t.Fatalf("status=%v, want READY", persisted["status"])
+	}
+	if persisted["remote_status"] != constants.RemoteStatusFailed {
+		t.Fatalf("remote_status=%v, want failed", persisted["remote_status"])
+	}
+	if v, ok := persisted["export_uuids"]; ok && strings.TrimSpace(fmt.Sprint(v)) != "" {
+		t.Fatalf("export_uuids must be empty, got %v", v)
 	}
 }
 

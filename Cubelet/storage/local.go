@@ -126,6 +126,13 @@ var (
 				Describe: "storage plugin db",
 			},
 		},
+		{
+			BucketDefine: &multimetadb.BucketDefine{
+				Name:     s3MetadataBucket,
+				DbName:   "storage",
+				Describe: "s3 node-local metadata base volume",
+			},
+		},
 	}
 	nfsBucketName  = "nfs/v1"
 	failoverNfsDir = "nfsfailoverdir"
@@ -695,6 +702,9 @@ func (l *local) Init(ctx context.Context, opts *workflow.InitInfo) error {
 			return err
 		}
 		if err := l.ensureCowManager(); err != nil {
+			return err
+		}
+		if err := EnsureS3MetadataReady(ctx); err != nil {
 			return err
 		}
 	} else {

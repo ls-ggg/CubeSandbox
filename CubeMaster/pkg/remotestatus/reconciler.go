@@ -160,6 +160,8 @@ func terminalRemoteStatus(state string, remoteReady bool) (string, bool) {
 		return constants.RemoteStatusReady, true
 	case constants.RemoteStatusFailed:
 		return constants.RemoteStatusFailed, true
+	case constants.RemoteStatusRunning, constants.RemoteStatusInProgress, constants.RemoteStatusPending:
+		return "", false
 	}
 	if remoteReady {
 		return constants.RemoteStatusReady, true

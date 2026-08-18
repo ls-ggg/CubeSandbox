@@ -6,8 +6,8 @@
 //
 // [Store] is the base interface; concrete backends are subclasses:
 //   - [NameXfsCow] ("xfscow"): local XFS/reflink via cubecow
-//   - [NameS3] ("s3"): S3 scheme Store (mock today: same cubecow/XFS semantics;
-//     real remote sync/status comes later)
+//   - [NameS3] ("s3"): S3 scheme Store (cubecow kind=s3; export/fetch/status
+//     for cross-node)
 //
 // XFS and S3 Stores coexist in one Cubelet process. Callers pick a backend via
 // request `type` / [NormalizeBackend] (see storage.StoreFor). Legacy helpers

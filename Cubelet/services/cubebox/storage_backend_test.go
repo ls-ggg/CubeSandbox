@@ -108,6 +108,15 @@ func TestPrepareSnapshotWorkLayoutS3UsesKindRoot(t *testing.T) {
 	if layout.DiskDir != filepath.Join(layout.Home, "disk") {
 		t.Fatalf("s3 disk=%q", layout.DiskDir)
 	}
+	if layout.TmpHome != layout.Home || layout.MetaWork != layout.MetaDir {
+		t.Fatalf("s3 must write in place, tmp=%q work=%q home=%q meta=%q", layout.TmpHome, layout.MetaWork, layout.Home, layout.MetaDir)
+	}
+	if layout.MemoryWork != layout.MemoryDir || layout.DiskWork != layout.DiskDir {
+		t.Fatalf("s3 memory/disk work must be final dirs")
+	}
+	if layout.usesTmpRename() {
+		t.Fatal("s3 must not use tmp+rename")
+	}
 	if strings.Contains(layout.Home, "cubebox") {
 		t.Fatal("s3 layout must not use xfs cubebox nesting")
 	}
@@ -128,6 +137,9 @@ func TestPrepareSnapshotWorkLayoutXFSUsesKindRoot(t *testing.T) {
 	}
 	if layout.MemoryDir != layout.MetaDir || layout.DiskDir != layout.MetaDir {
 		t.Fatalf("xfs memory/disk should share metadata, memory=%q disk=%q", layout.MemoryDir, layout.DiskDir)
+	}
+	if layout.TmpHome != layout.Home+".tmp" || !layout.usesTmpRename() {
+		t.Fatalf("xfs must keep tmp+rename, tmp=%q", layout.TmpHome)
 	}
 	if strings.Contains(layout.Home, "cubebox") {
 		t.Fatal("xfs layout must not use cubebox nesting")

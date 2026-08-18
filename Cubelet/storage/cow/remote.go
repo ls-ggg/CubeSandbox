@@ -12,10 +12,17 @@ import (
 
 // Remote state values for snapshot cross-node readiness (Master remote_status).
 const (
-	RemoteStatePending = "pending" // never uploaded
-	RemoteStateRunning = "running" // upload in progress
-	RemoteStateReady   = "ready"   // remote_uuids present (remote_ready)
+	RemoteStatePending = "pending" // never uploaded / cubecow NONE
+	RemoteStateRunning = "running" // upload in progress / cubecow INPROGRESS
+	RemoteStateReady   = "ready"   // remote_uuids present / cubecow DONE
 	RemoteStateFailed  = "failed"
+)
+
+// cubecow_get_volume_info export_status values (s3-support).
+const (
+	ExportStatusNone       = "NONE"
+	ExportStatusInProgress = "INPROGRESS"
+	ExportStatusDone       = "DONE"
 )
 
 // RemoteUUIDs is the JSON blob Master stores so another node can Fetch.
@@ -69,8 +76,7 @@ type VolumeRemoteInfo struct {
 }
 
 // RemoteStatus is upload progress plus local volume info.
-// Real upload state will come from cubecow_get_volume_info; Cubelet Status
-// mocks ready until that field exists.
+// State comes from cubecow export_status (NONE/empty/INPROGRESS/DONE).
 type RemoteStatus struct {
 	SnapshotID   string             `json:"snapshot_id"`
 	State        string             `json:"state"`

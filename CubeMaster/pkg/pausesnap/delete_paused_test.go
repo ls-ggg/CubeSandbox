@@ -116,6 +116,15 @@ func TestBeginCompletePersistsBackendAndRemoteStatus(t *testing.T) {
 	require.Equal(t, `{"rootfs":"export-a"}`, ready.ExportUUIDs)
 	require.Equal(t, constants.RemoteStatusInProgress, ready.RemoteStatus)
 
+	snapID2, err := Begin(ctx, "sb-s3-noexport", "node-1", "10.0.0.9", "cubebox", "s3")
+	require.NoError(t, err)
+	require.NoError(t, Complete(ctx, "sb-s3-noexport", snapID2, "node-1", "10.0.0.9", "cubebox", nil, ""))
+	ready2, err := GetBySnapshotID(ctx, snapID2)
+	require.NoError(t, err)
+	require.Equal(t, statusReady, ready2.Status)
+	require.Equal(t, constants.RemoteStatusFailed, ready2.RemoteStatus)
+	require.Empty(t, ready2.ExportUUIDs)
+
 	_, err = Begin(ctx, "sb-bad", "node-1", "10.0.0.9", "cubebox", "nfs")
 	require.Error(t, err)
 }

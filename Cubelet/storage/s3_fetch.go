@@ -15,8 +15,8 @@ import (
 
 // Fetch implements [cow.Fetcher]. Cross-node use calls cubecow_import_lvol
 // first. activate=true then cubecow_activate_volume (fetch may already
-// open the device). Same-node / mock: objects already exist → skip fetch,
-// only activate when asked.
+// open the device). Same-node: objects already exist → skip import,
+// only activate when asked (no remote uuid required).
 func (m *S3Cow) Fetch(ctx context.Context, snapshotID string, uuids *cow.RemoteUUIDs, activate bool) error {
 	id := strings.TrimSpace(snapshotID)
 	if id == "" {
@@ -26,7 +26,11 @@ func (m *S3Cow) Fetch(ctx context.Context, snapshotID string, uuids *cow.RemoteU
 		return fmt.Errorf("remote_uuids is required for fetch")
 	}
 	refs := activateObjectRefs(ctx, cow.BackendS3, id)
+	refs = appendMetadataFetchRef(refs, id, uuids)
 	for _, ref := range refs {
+		if IsS3MetadataBaseName(ref.Name) {
+			continue
+		}
 		uuid := uuidForRole(uuids, ref.Role)
 		if uuid == "" {
 			continue
@@ -41,6 +45,22 @@ func (m *S3Cow) Fetch(ctx context.Context, snapshotID string, uuids *cow.RemoteU
 		}
 	}
 	return nil
+}
+
+func appendMetadataFetchRef(refs []CowObjectRef, snapshotID string, uuids *cow.RemoteUUIDs) []CowObjectRef {
+	if uuids == nil || strings.TrimSpace(uuids.Metadata) == "" {
+		return refs
+	}
+	for _, ref := range refs {
+		if ref.Role == "metadata" {
+			return refs
+		}
+	}
+	name := S3MetadataVolumeName(snapshotID)
+	if name == "" || IsS3MetadataBaseName(name) {
+		return refs
+	}
+	return append(refs, CowObjectRef{Name: name, Kind: cowKindSnapshot, Role: "metadata"})
 }
 
 func (m *S3Cow) fetchOne(ctx context.Context, name, remoteUUID string) error {

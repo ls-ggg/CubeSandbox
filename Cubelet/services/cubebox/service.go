@@ -757,7 +757,7 @@ func (s *service) Destroy(ctx context.Context, req *cubebox.DestroyCubeSandboxRe
 				backend = b
 			}
 		}
-		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend))
+		s.bestEffortCleanupPauseSnapshot(ctx, req.RequestID, pauseSnapToGC, cleanupBackendForPauseSnap(backend, pauseSnapToGC))
 	}
 	return rsp, nil
 }

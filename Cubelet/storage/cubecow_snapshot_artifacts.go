@@ -71,7 +71,7 @@ func ActiveCowStore() cow.Store {
 	return localStorage.cowManager
 }
 
-// ActiveS3CowStore returns the S3 CoW Store (mock), or nil when unset.
+// ActiveS3CowStore returns the S3 CoW Store, or nil when unset.
 func ActiveS3CowStore() cow.Store {
 	if localStorage == nil {
 		return nil
@@ -108,6 +108,7 @@ func DefaultTemplateObjectRefs(templateID string) []CowObjectRef {
 		{Name: cowTemplateRootfsName(templateID), Kind: cowKindSnapshot, Role: "rootfs"},
 		{Name: cowTemplateMemoryName(templateID), Kind: cowKindVolume, Role: "memory"},
 		{Name: cowTemplateBuildRootfsName(templateID), Kind: cowKindVolume, Role: "build_rootfs"},
+		{Name: S3MetadataVolumeName(templateID), Kind: cowKindSnapshot, Role: "metadata"},
 	}
 }
 
@@ -307,6 +308,8 @@ func normalizeCowKindForRole(kind, role string) (string, error) {
 	if strings.TrimSpace(kind) == "" {
 		switch strings.ToLower(strings.TrimSpace(role)) {
 		case "rootfs":
+			return cowKindSnapshot, nil
+		case "metadata":
 			return cowKindSnapshot, nil
 		default:
 			// memory / build_rootfs / unknown -> volume (matches rollback path)

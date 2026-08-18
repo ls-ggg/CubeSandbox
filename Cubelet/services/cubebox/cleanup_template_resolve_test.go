@@ -91,16 +91,18 @@ func TestResolveCleanupRefsFallsBackToDeterministicOnCatalogMiss(t *testing.T) {
 	templateID := "tpl-resolve-miss"
 	refs, snapPath, err := resolveCleanupRefs(context.Background(), "", templateID, nil, "/legacy/fallback")
 	require.NoError(t, err)
-	require.Len(t, refs, 3)
+	require.Len(t, refs, 4)
 	assert.Equal(t, "tpl-"+templateID+"-rootfs", refs[0].Name)
 	assert.Equal(t, "tpl-"+templateID+"-memory", refs[1].Name)
 	assert.Equal(t, "tpl-"+templateID+"-build-rootfs", refs[2].Name)
+	assert.Equal(t, "s3-meta-"+templateID, refs[3].Name)
+	assert.Equal(t, "metadata", refs[3].Role)
 	// catalog miss: snapshot path comes from caller (best-effort) since we
 	// can't derive it locally.
 	assert.Equal(t, "/legacy/fallback", snapPath)
 }
 
-func TestResolveCleanupRefsDoesNotScanOtherBackend(t *testing.T) {
+func TestResolveCleanupRefsFindsS3CatalogWhenXFSMisses(t *testing.T) {
 	templateID := "tpl-s3-on-xfs-req"
 	snapDir := filepath.Join(t.TempDir(), "s3", templateID)
 	require.NoError(t, storage.WriteSnapshotCatalogFor("s3", &storage.SnapshotCatalogEntry{
@@ -114,9 +116,9 @@ func TestResolveCleanupRefsDoesNotScanOtherBackend(t *testing.T) {
 
 	refs, snapPath, err := resolveCleanupRefs(context.Background(), "xfs", templateID, nil, "")
 	require.NoError(t, err)
-	require.Len(t, refs, 3)
-	assert.Equal(t, "tpl-"+templateID+"-rootfs", refs[0].Name)
-	assert.NotEqual(t, snapDir, snapPath)
+	require.Len(t, refs, 2)
+	assert.Equal(t, "s3-rootfs", refs[0].Name)
+	assert.Equal(t, snapDir, snapPath)
 }
 
 func TestResolveCleanupRefsCatalogWithoutBuildRootfsStillCleansFromCatalog(t *testing.T) {

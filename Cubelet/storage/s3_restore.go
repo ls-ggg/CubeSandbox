@@ -9,10 +9,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
-// Activate implements [cow.Activator]. Mock: open cubecow objects that
+// Activate implements [cow.Activator]. Opens cubecow objects that
 // already exist locally. Missing objects fail — there is no remote ingest.
 // Does not start a sandbox.
 func (m *S3Cow) Activate(ctx context.Context, snapshotID string) error {
@@ -31,14 +32,26 @@ func activateStoreObjects(ctx context.Context, store cow.Store, backend, snapsho
 		return fmt.Errorf("%w: snapshot %s has no rootfs/memory objects", ErrCowObjectMissing, id)
 	}
 	for _, ref := range refs {
+		if IsS3MetadataBaseName(ref.Name) {
+			continue
+		}
 		info, err := store.GetVolumeInfo(ctx, ref.Name)
 		if err != nil {
+			if ref.Role == "metadata" && isCowSemantic(err, cubecow.SemNotFound) {
+				continue
+			}
 			return err
 		}
 		if info == nil {
+			if ref.Role == "metadata" {
+				continue
+			}
 			return fmt.Errorf("%w: snapshot %s object %s", ErrCowObjectMissing, id, ref.Name)
 		}
 		if _, err := store.ResolveDevPath(ctx, ref.Name, ref.Kind); err != nil {
+			if ref.Role == "metadata" && isCowSemantic(err, cubecow.SemNotFound) {
+				continue
+			}
 			return fmt.Errorf("activate snapshot %s object %s: %w", id, ref.Name, err)
 		}
 	}
@@ -48,7 +61,7 @@ func activateStoreObjects(ctx context.Context, store cow.Store, backend, snapsho
 func activateObjectRefs(ctx context.Context, backend, snapshotID string) []CowObjectRef {
 	entry, err := GetLocalSnapshotFor(ctx, backend, snapshotID)
 	if err == nil && entry != nil {
-		refs := make([]CowObjectRef, 0, 2)
+		refs := make([]CowObjectRef, 0, 3)
 		if name := strings.TrimSpace(entry.RootfsVol); name != "" {
 			kind := strings.TrimSpace(entry.RootfsKind)
 			if kind == "" {
@@ -63,12 +76,29 @@ func activateObjectRefs(ctx context.Context, backend, snapshotID string) []CowOb
 			}
 			refs = append(refs, CowObjectRef{Name: name, Kind: kind, Role: "memory"})
 		}
+		if name := strings.TrimSpace(entry.MetadataVol); name != "" && !IsS3MetadataBaseName(name) {
+			kind := strings.TrimSpace(entry.MetadataKind)
+			if kind == "" {
+				kind = cowKindSnapshot
+			}
+			refs = append(refs, CowObjectRef{Name: name, Kind: kind, Role: "metadata"})
+		} else if isS3CatalogBackend(backend) {
+			if meta := S3MetadataVolumeName(entry.SnapshotID); meta != "" && !IsS3MetadataBaseName(meta) {
+				refs = append(refs, CowObjectRef{Name: meta, Kind: cowKindSnapshot, Role: "metadata"})
+			}
+		}
 		if len(refs) > 0 {
 			return refs
 		}
 	}
-	return []CowObjectRef{
+	refs := []CowObjectRef{
 		{Name: cowTemplateRootfsName(snapshotID), Kind: cowKindSnapshot, Role: "rootfs"},
 		{Name: cowTemplateMemoryName(snapshotID), Kind: cowKindVolume, Role: "memory"},
 	}
+	if isS3CatalogBackend(backend) {
+		if meta := S3MetadataVolumeName(snapshotID); meta != "" && !IsS3MetadataBaseName(meta) {
+			refs = append(refs, CowObjectRef{Name: meta, Kind: cowKindSnapshot, Role: "metadata"})
+		}
+	}
+	return refs
 }

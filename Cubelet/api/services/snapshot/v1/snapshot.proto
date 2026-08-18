@@ -10,8 +10,8 @@ option go_package = "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/sn
 
 // Snapshot is Cubelet's snapshot control-plane service.
 // Status is the upload query CubeMaster polls for remote_status.
-// Real upload state will come from cubecow_get_volume_info; that field
-// is not ready yet, so S3 Status is mocked ready.
+// State comes from cubecow_get_volume_info export_status
+// (NONE→pending, INPROGRESS→running, DONE→ready).
 service Snapshot {
   rpc Status(StatusRequest) returns (StatusResponse);
 }

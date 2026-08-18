@@ -126,13 +126,9 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 		if exportUUIDs == "" {
 			exportUUIDs = remoteUUIDsFromExtInfo(cubeRsp.GetExtInfo())
 		}
-		if exportUUIDs == "" {
-			msg := "s3 pause returned empty remote_uuids"
-			pausesnap.MarkFailed(ctx, req.SandboxID, snapID, msg)
-			rsp.Ret.RetCode = int(errorcode.ErrorCode_Unknown)
-			rsp.Ret.RetMsg = msg
-			return rsp
-		}
+		// Empty uuids means export failed or still pending on Cubelet.
+		// Pause itself succeeded — same-node Resume does not need uuids;
+		// Complete records remote_status=failed when uuids are empty.
 	}
 	if err := pausesnap.Complete(ctx, req.SandboxID, snapID, nodeID, hostIP, req.InstanceType, released, exportUUIDs); err != nil {
 		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, err.Error())

@@ -50,6 +50,11 @@ type SnapshotCatalogEntry struct {
 	RootfsKind   string `json:"rootfs_kind"`
 	MemoryVol    string `json:"memory_vol"`
 	MemoryKind   string `json:"memory_kind"`
+	// MetadataVol/Kind is the S3 cubecow snapshot cloned from this node's
+	// 8MiB metadata base. Empty on XFS (plain directory). The node-local
+	// base itself is never recorded here and is never exported.
+	MetadataVol  string `json:"metadata_vol,omitempty"`
+	MetadataKind string `json:"metadata_kind,omitempty"`
 	// BuildRootfsVol/Kind track the temporary writable working layer created
 	// during template build (AppSnapshot path). They must be cleaned up at
 	// template delete time. Empty for runtime snapshots (CommitSandbox), which

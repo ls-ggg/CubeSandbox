@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -59,22 +60,30 @@ func TestCommitRootfsForUsesS3Store(t *testing.T) {
 	require.Equal(t, [][2]string{{"sb-1-rootfs-gen0", "tpl-snap-s3-rootfs"}}, engine.createSnapshots)
 }
 
-func TestUploadSnapshotMockReady(t *testing.T) {
-	useTestCowStorage(t, &fakeCowEngine{})
+func TestUploadSnapshotExportsRealUUIDs(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
 
 	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
-	require.Equal(t, cow.RemoteStateReady, st.State)
+	require.Equal(t, cow.RemoteStateRunning, st.State)
 
 	uuids, err := UploadSnapshot(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
 	require.False(t, uuids.Empty())
-	require.NotEmpty(t, uuids.Rootfs)
-	require.NotEmpty(t, uuids.Memory)
+	require.Equal(t, "export-tpl-snap-1-rootfs", uuids.Rootfs)
+	require.Equal(t, "export-tpl-snap-1-memory", uuids.Memory)
+	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.exportSnapshots)
 
 	st, err = SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
-	require.Equal(t, cow.RemoteStateReady, st.State)
+	// Volumes exist but export_status is empty → still running until DONE.
+	require.Equal(t, cow.RemoteStateRunning, st.State)
 	require.Equal(t, "snap-1", st.SnapshotID)
 	require.Equal(t, uuids.Rootfs, st.RemoteUUIDs.Rootfs)
 
@@ -83,6 +92,26 @@ func TestUploadSnapshotMockReady(t *testing.T) {
 	st, err = SnapshotUploadStatus(context.Background(), cow.BackendXFS, "snap-1")
 	require.NoError(t, err)
 	require.Equal(t, cow.RemoteStateReady, st.State)
+}
+
+func TestUploadSnapshotFailsWithoutMintingUUID(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
+		},
+		exportErr: fmt.Errorf("export denied"),
+	}
+	useTestCowStorage(t, engine)
+
+	uuids, err := UploadSnapshot(context.Background(), cow.BackendS3, "snap-1")
+	require.Error(t, err)
+	require.Nil(t, uuids)
+	require.Contains(t, err.Error(), "export denied")
+
+	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.RemoteStateFailed, st.State)
 }
 
 func TestActivateSnapshotActivatesLocalObjects(t *testing.T) {

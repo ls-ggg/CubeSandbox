@@ -166,6 +166,22 @@ func TestReconcileOnceSkipsQueryError(t *testing.T) {
 	assertRemote(t, db, constants.PauseSnapshotTableName, "pause-err", constants.RemoteStatusInProgress)
 }
 
+func TestTerminalRemoteStatusRunningStaysOpen(t *testing.T) {
+	if next, ok := terminalRemoteStatus(constants.RemoteStatusRunning, false); ok {
+		t.Fatalf("running must not be terminal, got %q", next)
+	}
+	if next, ok := terminalRemoteStatus(constants.RemoteStatusInProgress, false); ok {
+		t.Fatalf("inprogress must not be terminal, got %q", next)
+	}
+	if next, ok := terminalRemoteStatus(constants.RemoteStatusPending, false); ok {
+		t.Fatalf("pending must not be terminal, got %q", next)
+	}
+	next, ok := terminalRemoteStatus(constants.RemoteStatusReady, true)
+	if !ok || next != constants.RemoteStatusReady {
+		t.Fatalf("ready terminal=%v %q", ok, next)
+	}
+}
+
 func assertRemote(t *testing.T, db *gorm.DB, table, snapshotID, want string) {
 	t.Helper()
 	var got string

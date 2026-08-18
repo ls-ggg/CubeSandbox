@@ -14,11 +14,7 @@ import (
 func TestUploadRemoteUUIDsIfS3SkipsXFS(t *testing.T) {
 	t.Parallel()
 	for _, backend := range []string{"", cow.BackendXFS, "cubecow"} {
-		raw, err := uploadRemoteUUIDsIfS3(context.Background(), backend, "snap-1")
-		if err != nil {
-			t.Fatalf("backend %q: %v", backend, err)
-		}
-		if raw != "" {
+		if raw := uploadRemoteUUIDsIfS3(context.Background(), backend, "snap-1"); raw != "" {
 			t.Fatalf("backend %q: unexpected uuids %s", backend, raw)
 		}
 	}

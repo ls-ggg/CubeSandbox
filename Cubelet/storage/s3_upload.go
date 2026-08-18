@@ -6,12 +6,9 @@ package storage
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"strings"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
@@ -30,17 +27,31 @@ type cowVolumeImporter interface {
 }
 
 // Upload implements [cow.Uploader]. Calls cubecow_export_snapshot per
-// snapshot disk (rootfs / memory / metadata). Current S3 mock reuses the
-// XFS cubecow engine, which returns precondition-failed; then a stable
-// mock uuid is recorded so Master can persist the JSON blob.
+// snapshot disk (rootfs / memory / metadata). Failure returns an error and
+// does not persist remote_uuids — Master treats that as upload failed.
+// Success returns real export uuids and records local state as running;
+// terminal ready comes later from cubecow export_status via UploadStatus.
 func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs, error) {
-	_ = ctx
 	id := strings.TrimSpace(snapshotID)
 	if id == "" {
 		return nil, fmt.Errorf("snapshot_id is required")
 	}
 	uuids := &cow.RemoteUUIDs{}
 	for _, ref := range activateObjectRefs(ctx, cow.BackendS3, id) {
+		if IsS3MetadataBaseName(ref.Name) {
+			continue
+		}
+		if ref.Role == "metadata" {
+			info, infoErr := m.GetVolumeInfo(ctx, ref.Name)
+			exists, existsErr := cowObjectPresent(info, infoErr)
+			if existsErr != nil {
+				m.setUpload(id, cow.RemoteStateFailed, existsErr.Error(), nil)
+				return nil, fmt.Errorf("upload %s %s: %w", ref.Role, ref.Name, existsErr)
+			}
+			if !exists {
+				continue
+			}
+		}
 		uuid, err := m.uploadOne(ref.Name)
 		if err != nil {
 			m.setUpload(id, cow.RemoteStateFailed, err.Error(), nil)
@@ -51,16 +62,20 @@ func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs
 			uuids.Rootfs = uuid
 		case "memory":
 			uuids.Memory = uuid
+		case "metadata":
+			uuids.Metadata = uuid
 		}
 	}
+	if uuids.Empty() {
+		m.setUpload(id, cow.RemoteStateFailed, "empty remote_uuids", nil)
+		return nil, fmt.Errorf("s3 export returned empty remote_uuids for %s", id)
+	}
 	if entry, err := GetLocalSnapshotFor(ctx, cow.BackendS3, id); err == nil && entry != nil {
-		if meta := strings.TrimSpace(entry.MetaDir); meta != "" {
-			uuids.Metadata = m.mockRemoteUUID(id + ":metadata")
-		}
 		entry.RemoteUUIDs = uuids
 		_ = WriteSnapshotCatalogFor(cow.BackendS3, entry)
 	}
-	m.setUpload(id, cow.RemoteStateReady, "uploaded", uuids)
+	// Export accepted; upload may still be in flight on the S3 backend.
+	m.setUpload(id, cow.RemoteStateRunning, "export started", uuids)
 	return uuids, nil
 }
 
@@ -69,26 +84,27 @@ func (m *S3Cow) uploadOne(name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("object name is required")
 	}
-	if exp, ok := m.engine.(cowSnapshotExporter); ok {
-		uuid, err := exp.ExportSnapshot(name)
-		if err == nil && strings.TrimSpace(uuid) != "" {
-			return uuid, nil
-		}
-		if err != nil && !isCowSemantic(err, cubecow.SemPreconditionFailed) {
-			return "", err
-		}
+	if IsS3MetadataBaseName(name) {
+		return "", fmt.Errorf("refusing to export node-local s3 metadata base %s", name)
 	}
-	return m.mockRemoteUUID(name), nil
-}
-
-func (m *S3Cow) mockRemoteUUID(name string) string {
-	sum := sha1.Sum([]byte("s3-remote:" + name))
-	return "remote-" + hex.EncodeToString(sum[:12])
+	exp, ok := m.engine.(cowSnapshotExporter)
+	if !ok || exp == nil {
+		return "", fmt.Errorf("cubecow engine does not support export_snapshot")
+	}
+	uuid, err := exp.ExportSnapshot(name)
+	if err != nil {
+		return "", err
+	}
+	uuid = strings.TrimSpace(uuid)
+	if uuid == "" {
+		return "", fmt.Errorf("cubecow_export_snapshot returned empty uuid for %s", name)
+	}
+	return uuid, nil
 }
 
 // UploadStatus implements [cow.Uploader].
-// Real upload state will come from cubecow_get_volume_info; that field is
-// not ready, so S3 always reports ready for CubeMaster.
+// Aggregates cubecow_get_volume_info export_status:
+// NONE → pending, empty/INPROGRESS → running, DONE → ready.
 func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.RemoteStatus, error) {
 	id := strings.TrimSpace(snapshotID)
 	if id == "" {
@@ -96,16 +112,129 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 	}
 	st := &cow.RemoteStatus{
 		SnapshotID: id,
-		State:      cow.RemoteStateReady,
-		Message:    "mock: get_volume_info upload status not ready",
+		State:      cow.RemoteStatePending,
 	}
+
 	m.uploadLock.Lock()
 	entry, ok := m.uploadStates[id]
 	m.uploadLock.Unlock()
 	if ok {
 		st.RemoteUUIDs = entry.uuids
+		if entry.state == cow.RemoteStateFailed {
+			st.State = cow.RemoteStateFailed
+			st.Message = entry.message
+			return st, nil
+		}
 	} else if cat, err := GetLocalSnapshotFor(ctx, cow.BackendS3, id); err == nil && cat != nil && !cat.RemoteUUIDs.Empty() {
 		st.RemoteUUIDs = cat.RemoteUUIDs
+	}
+
+	refs := activateObjectRefs(ctx, cow.BackendS3, id)
+	if len(refs) == 0 {
+		st.State = cow.RemoteStateRunning
+		st.Message = "waiting for local snapshot objects"
+		return st, nil
+	}
+
+	var (
+		sawAny       bool
+		allDone      = true
+		anyProgress  bool
+		anyNone      bool
+		localVolumes []cow.VolumeRemoteInfo
+		messages     []string
+	)
+	for _, ref := range refs {
+		if IsS3MetadataBaseName(ref.Name) {
+			continue
+		}
+		info, infoErr := m.GetVolumeInfo(ctx, ref.Name)
+		exists, existsErr := cowObjectPresent(info, infoErr)
+		if existsErr != nil {
+			st.State = cow.RemoteStateFailed
+			st.Message = existsErr.Error()
+			return st, nil
+		}
+		vol := cow.VolumeRemoteInfo{Name: ref.Name, Role: ref.Role, Exists: exists}
+		if info != nil {
+			vol.DevicePath = strings.TrimSpace(info.DevicePath)
+		}
+		localVolumes = append(localVolumes, vol)
+		if !exists {
+			if ref.Role == "metadata" {
+				continue
+			}
+			allDone = false
+			anyProgress = true
+			continue
+		}
+		sawAny = true
+		status := ""
+		uuid := ""
+		if info != nil {
+			status = strings.ToUpper(strings.TrimSpace(info.ExportStatus))
+			uuid = strings.TrimSpace(info.ExportUUID)
+		}
+		if uuid != "" {
+			if st.RemoteUUIDs == nil {
+				st.RemoteUUIDs = &cow.RemoteUUIDs{}
+			}
+			switch ref.Role {
+			case "rootfs":
+				if st.RemoteUUIDs.Rootfs == "" {
+					st.RemoteUUIDs.Rootfs = uuid
+				}
+			case "memory":
+				if st.RemoteUUIDs.Memory == "" {
+					st.RemoteUUIDs.Memory = uuid
+				}
+			case "metadata":
+				if st.RemoteUUIDs.Metadata == "" {
+					st.RemoteUUIDs.Metadata = uuid
+				}
+			}
+		}
+		switch status {
+		case cow.ExportStatusDone:
+			// ok
+		case cow.ExportStatusInProgress, "":
+			// Empty means cubecow has not reported yet — still uploading.
+			allDone = false
+			anyProgress = true
+		case cow.ExportStatusNone:
+			allDone = false
+			anyNone = true
+		default:
+			allDone = false
+			anyProgress = true
+			messages = append(messages, fmt.Sprintf("%s=%s", ref.Name, status))
+		}
+	}
+	st.LocalVolumes = localVolumes
+
+	if !sawAny {
+		st.State = cow.RemoteStateRunning
+		st.Message = "waiting for snapshot volumes"
+		return st, nil
+	}
+
+	switch {
+	case allDone:
+		st.State = cow.RemoteStateReady
+		st.Message = "export_status DONE"
+	case anyProgress:
+		st.State = cow.RemoteStateRunning
+		if len(messages) > 0 {
+			st.Message = strings.Join(messages, "; ")
+		} else {
+			st.Message = "export_status INPROGRESS"
+		}
+	case anyNone:
+		st.State = cow.RemoteStatePending
+		st.Message = "export_status NONE"
+	default:
+		st.State = cow.RemoteStateRunning
+		st.Message = "export in progress"
 	}
 	return st, nil
 }

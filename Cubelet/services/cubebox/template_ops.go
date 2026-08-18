@@ -177,12 +177,17 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 
 	cleanupArtifacts := func() {
+		layout.releaseMetadata(ctx)
 		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+		layout.discardTmpDir()
+		if !layout.usesTmpRename() {
+			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+		}
 	}
 
-	_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-	if err := layout.ensureTmp(); err != nil {
-		cleanupCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject)
+	layout.resetTmpDir()
+	if err := layout.prepareWork(ctx); err != nil {
+		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", err)
 		return rsp, nil
@@ -194,7 +199,6 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// using the default full type via its own call site.
 	stepLog = stepLog.WithFields(CubeLog.Fields{"snapshotType": snapshotTypeForCmd})
 	if err := s.executeCubeRuntimeSnapshot(ctx, rsp.SandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeForCmd); err != nil {
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", err)
@@ -213,7 +217,6 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// in prepareCommitMemoryArtifact, which is self-contained and safe.
 	setRuntimeSnapshotBindingLabels(cb, rsp.TemplateID, time.Now().UTC())
 	if err := writeMemoryDevFile(layout.MemoryWork, memoryObject.DevPath); err != nil {
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to write memory.dev: %v", err)
@@ -221,7 +224,6 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	}
 	if layout.DiskWork != layout.MetaWork {
 		if err := writeDiskDevFile(layout.DiskWork, rootfsObject.DevPath); err != nil {
-			_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 			cleanupArtifacts()
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to write disk.dev: %v", err)
@@ -229,26 +231,29 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		}
 	}
 	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject); err != nil {
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to deactivate snapshot objects: %v", err)
 		return rsp, nil
 	}
-	// NOCC:Path Traversal()
-	if err := os.RemoveAll(snapshotPath); err != nil {
-		stepLog.Warnf("failed to remove existing snapshot path: %v", err)
-	}
-	if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
-		_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-		cleanupArtifacts()
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
-		return rsp, nil
+	if layout.usesTmpRename() {
+		// NOCC:Path Traversal()
+		if err := os.RemoveAll(snapshotPath); err != nil {
+			stepLog.Warnf("failed to remove existing snapshot path: %v", err)
+		}
+		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
+			_ = os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+			cleanupArtifacts()
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
+			return rsp, nil
+		}
 	}
 	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
-		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		cleanupArtifacts()
+		if layout.usesTmpRename() {
+			_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
+		}
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to expose shim spec dir: %v", err)
 		return rsp, nil
@@ -284,6 +289,8 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		RootfsKind:        rootfsObject.Kind,
 		MemoryVol:         memoryObject.Name,
 		MemoryKind:        memoryObject.Kind,
+		MetadataVol:       storage.S3MetadataCatalogVol(backend, rsp.TemplateID),
+		MetadataKind:      storage.S3MetadataCatalogKind(backend),
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
 		ComponentVersions: cloneStringMap(cb.ComponentVersions),
 		Kind:              storage.CatalogKindRuntimeSnapshot,
@@ -295,11 +302,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		// drift between master and cubelet local view.
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, err)
 	}
-	if raw, err := uploadRemoteUUIDsIfS3(ctx, backend, rsp.TemplateID); err != nil {
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to export snapshot: %v", err)
-		return rsp, nil
-	} else {
+	if raw := uploadRemoteUUIDsIfS3(ctx, backend, rsp.TemplateID); raw != "" {
 		rsp.RemoteUuids = raw
 	}
 	// Persist the runtime-snapshot binding update we did in-memory after
@@ -465,6 +468,13 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	if _, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID); errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
+		if other := otherCowBackend(backend); other != backend {
+			if _, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
+				backend = other
+			}
+		}
+	}
 	refs, snapshotPath, err := resolveCleanupRefs(ctx, backend, rsp.TemplateID, req.GetObjects(), req.GetSnapshotPath())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
@@ -475,6 +485,9 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 	// even when cubecow objects are already gone or still busy. Returning
 	// early on object cleanup leaked S3 pause-snapshot dirs after Resume.
 	if storage.IsCowBackend() {
+		if err := storage.ReleaseS3MetadataVolume(ctx, backend, rsp.TemplateID); err != nil {
+			log.G(ctx).Warnf("CleanupTemplate %s: s3 metadata umount: %v", rsp.TemplateID, err)
+		}
 		if err := storage.CleanupObjectsFor(ctx, backend, refs); err != nil {
 			log.G(ctx).Warnf("CleanupTemplate %s: cubecow object cleanup: %v", rsp.TemplateID, err)
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
@@ -514,6 +527,13 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 		return refs, ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, templateID)
+	if err != nil || entry == nil {
+		if other := otherCowBackend(backend); other != backend {
+			if alt, altErr := storage.GetLocalSnapshotFor(ctx, other, templateID); altErr == nil && alt != nil {
+				entry, err, backend = alt, nil, other
+			}
+		}
+	}
 	if err == nil && entry != nil {
 		refs := cubecowRefsFromCatalogEntry(templateID, entry)
 		snapshotPath := strings.TrimSpace(entry.SnapshotPath)
@@ -528,6 +548,14 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 		log.G(ctx).Warnf("CleanupTemplate %s: catalog miss; falling back to deterministic refs", templateID)
 	}
 	return storage.DefaultTemplateObjectRefs(templateID), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
+}
+
+func otherCowBackend(backend string) string {
+	normalized, err := resolveRequestStorageBackend(backend)
+	if err == nil && normalized == cow.BackendS3 {
+		return cow.BackendXFS
+	}
+	return cow.BackendS3
 }
 
 func ensureSnapshotCleanupPath(ctx context.Context, backend, templateID, snapshotPath string) string {
@@ -574,6 +602,13 @@ func cubecowRefsFromCatalogEntry(templateID string, entry *storage.SnapshotCatal
 	}
 	if name := strings.TrimSpace(entry.BuildRootfsVol); name != "" {
 		refs = append(refs, storage.CowObjectRef{Name: name, Kind: entry.BuildRootfsKind, Role: "build_rootfs"})
+	}
+	if name := strings.TrimSpace(entry.MetadataVol); name != "" && !storage.IsS3MetadataBaseName(name) {
+		kind := strings.TrimSpace(entry.MetadataKind)
+		if kind == "" {
+			kind = storage.CowKindSnapshot
+		}
+		refs = append(refs, storage.CowObjectRef{Name: name, Kind: kind, Role: "metadata"})
 	}
 	if len(refs) == 0 {
 		return storage.DefaultTemplateObjectRefs(templateID)

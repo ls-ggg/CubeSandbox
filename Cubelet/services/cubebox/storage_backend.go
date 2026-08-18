@@ -5,6 +5,7 @@
 package cubebox
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,6 +62,7 @@ func snapshotKindDirForRequest(backend, kind, requested string) string {
 type snapshotWorkLayout struct {
 	Backend      string
 	Kind         string
+	SnapshotID   string
 	Home         string
 	TmpHome      string
 	ValidateBase string
@@ -87,6 +89,7 @@ func prepareSnapshotWorkLayout(backend, kind, snapshotID, requestedDir, specDir 
 	layout := snapshotWorkLayout{
 		Backend:      normalized,
 		Kind:         storage.SnapshotKindNormal,
+		SnapshotID:   snapshotID,
 		Home:         home,
 		TmpHome:      tmpHome,
 		ValidateBase: kindRoot,
@@ -97,10 +100,14 @@ func prepareSnapshotWorkLayout(backend, kind, snapshotID, requestedDir, specDir 
 		layout.Kind = storage.SnapshotKindPause
 	}
 	if normalized == cow.BackendS3 {
+		// S3 writes in place: mount the metadata snapshot at the final
+		// metadata/ and skip the XFS tmp+rename package dance.
+		layout.TmpHome = home
+		layout.MetaWork = layout.MetaDir
 		layout.MemoryDir = filepath.Join(home, storage.SnapshotMemoryDir)
 		layout.DiskDir = filepath.Join(home, storage.SnapshotDiskDir)
-		layout.MemoryWork = filepath.Join(tmpHome, storage.SnapshotMemoryDir)
-		layout.DiskWork = filepath.Join(tmpHome, storage.SnapshotDiskDir)
+		layout.MemoryWork = layout.MemoryDir
+		layout.DiskWork = layout.DiskDir
 	} else {
 		layout.MemoryDir = layout.MetaDir
 		layout.DiskDir = layout.MetaDir
@@ -115,9 +122,41 @@ func prepareSnapshotWorkLayout(backend, kind, snapshotID, requestedDir, specDir 
 	return layout, nil
 }
 
+func (l snapshotWorkLayout) usesTmpRename() bool {
+	return l.Backend != cow.BackendS3
+}
+
 func (l snapshotWorkLayout) ensureTmp() error {
 	if err := storage.EnsureSnapshotPackage(l.Backend, l.TmpHome); err != nil {
 		return err
 	}
 	return os.MkdirAll(l.MetaWork, 0o755)
+}
+
+func (l snapshotWorkLayout) prepareWork(ctx context.Context) error {
+	if l.Backend == cow.BackendS3 {
+		if err := storage.EnsureSnapshotPackage(l.Backend, l.Home); err != nil {
+			return err
+		}
+		return storage.PrepareS3MetadataMount(ctx, l.Backend, l.SnapshotID, l.MetaDir)
+	}
+	return l.ensureTmp()
+}
+
+func (l snapshotWorkLayout) resetTmpDir() {
+	if !l.usesTmpRename() {
+		return
+	}
+	_ = os.RemoveAll(l.TmpHome) // NOCC:Path Traversal()
+}
+
+func (l snapshotWorkLayout) discardTmpDir() {
+	if !l.usesTmpRename() {
+		return
+	}
+	_ = os.RemoveAll(l.TmpHome) // NOCC:Path Traversal()
+}
+
+func (l snapshotWorkLayout) releaseMetadata(ctx context.Context) {
+	_ = storage.ReleaseS3MetadataVolume(ctx, l.Backend, l.SnapshotID)
 }

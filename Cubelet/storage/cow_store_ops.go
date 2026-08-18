@@ -53,8 +53,8 @@ func UploadSnapshot(ctx context.Context, backend, snapshotID string) (*cow.Remot
 	return uploader.Upload(ctx, snapshotID)
 }
 
-// SnapshotUploadStatus returns upload state. S3 is mocked ready until
-// cubecow_get_volume_info reports upload.
+// SnapshotUploadStatus returns upload state from cubecow export_status
+// (NONE→pending, empty/INPROGRESS→running, DONE→ready). XFS is a no-op ready.
 func SnapshotUploadStatus(ctx context.Context, backend, snapshotID string) (*cow.RemoteStatus, error) {
 	uploader, err := requireCowUploader(backend)
 	if err != nil {

@@ -119,8 +119,9 @@ func Begin(ctx context.Context, sandboxID, nodeID, nodeIP, instanceType, backend
 }
 
 // Complete marks the pause snapshot READY and records the node + plugin volumes.
-// S3 export_uuids move remote_status to inprogress; CubeMaster does not query
-// Cubelet here — a background loop writes ready／failed later.
+// S3 export_uuids move remote_status to inprogress; empty uuids on an S3 row
+// mean export failed — remote_status=failed so CanCrossNode stays false while
+// same-node Resume still works. CubeMaster does not query Cubelet here.
 func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instanceType string, pluginVolumeIDs []string, exportUUIDs string) error {
 	client := getDB()
 	if client == nil {
@@ -144,10 +145,20 @@ func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instan
 	if raw, err := json.Marshal(uniqueNonEmpty(pluginVolumeIDs)); err == nil {
 		updates["plugin_volume_ids"] = string(raw)
 	}
-	if raw := strings.TrimSpace(exportUUIDs); raw != "" {
-		// Cross-node ids are S3-only; xfs callers must pass empty.
-		updates["export_uuids"] = raw
-		updates["remote_status"] = constants.RemoteStatusInProgress
+	var existing models.PauseSnapshotRecord
+	if err := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
+		Where("snapshot_id = ? AND sandbox_id = ?", snapshotID, sandboxID).
+		First(&existing).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	if constants.IsS3Backend(existing.Backend) {
+		if raw := strings.TrimSpace(exportUUIDs); raw != "" {
+			updates["export_uuids"] = raw
+			updates["remote_status"] = constants.RemoteStatusInProgress
+		} else {
+			updates["export_uuids"] = ""
+			updates["remote_status"] = constants.RemoteStatusFailed
+		}
 	}
 	res := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
 		Where("snapshot_id = ? AND sandbox_id = ?", snapshotID, sandboxID).

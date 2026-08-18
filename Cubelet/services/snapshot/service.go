@@ -15,6 +15,8 @@ import (
 
 	api "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/snapshot/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
 var _ api.SnapshotServer = &service{}
@@ -46,14 +48,13 @@ func (s *service) Register(server *grpc.Server) error {
 }
 
 func (s *service) Status(ctx context.Context, req *api.StatusRequest) (*api.StatusResponse, error) {
-	_ = ctx
 	backend, err := normalizeStatusBackend(req.GetBackend())
 	if err != nil {
 		return &api.StatusResponse{
 			RequestId:  req.GetRequestId(),
 			SnapshotId: req.GetSnapshotId(),
 			Backend:    strings.TrimSpace(req.GetBackend()),
-			State:      "failed",
+			State:      cow.RemoteStateFailed,
 			Message:    err.Error(),
 		}, nil
 	}
@@ -61,26 +62,41 @@ func (s *service) Status(ctx context.Context, req *api.StatusRequest) (*api.Stat
 		RequestId:  req.GetRequestId(),
 		SnapshotId: req.GetSnapshotId(),
 		Backend:    backend,
-		State:      "pending",
+		State:      cow.RemoteStatePending,
 	}
-	if backend != "s3" {
+	if backend != cow.BackendS3 {
 		rsp.Message = "xfs has no remote upload"
 		return rsp, nil
 	}
-	// cubecow_get_volume_info does not yet report upload. Mock ready so
-	// CubeMaster can persist remote_status=ready and pass CanCrossNode.
-	rsp.State = "ready"
-	rsp.RemoteReady = true
-	rsp.Message = "mock: get_volume_info upload status not ready"
+
+	st, err := storage.SnapshotUploadStatus(ctx, backend, req.GetSnapshotId())
+	if err != nil {
+		rsp.State = cow.RemoteStateFailed
+		rsp.Message = err.Error()
+		return rsp, nil
+	}
+	if st == nil {
+		rsp.Message = "empty upload status"
+		return rsp, nil
+	}
+	rsp.State = strings.TrimSpace(st.State)
+	if rsp.State == "" {
+		rsp.State = cow.RemoteStatePending
+	}
+	rsp.Message = st.Message
+	if st.RemoteUUIDs != nil && !st.RemoteUUIDs.Empty() && rsp.Message == "" {
+		rsp.Message = st.RemoteUUIDs.JSON()
+	}
+	rsp.RemoteReady = rsp.State == cow.RemoteStateReady
 	return rsp, nil
 }
 
 func normalizeStatusBackend(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "xfs", "cow", "cubecow", "reflink", "xfscow":
-		return "xfs", nil
+		return cow.BackendXFS, nil
 	case "s3":
-		return "s3", nil
+		return cow.BackendS3, nil
 	default:
 		return "", fmt.Errorf("unsupported backend %q (want xfs or s3)", raw)
 	}

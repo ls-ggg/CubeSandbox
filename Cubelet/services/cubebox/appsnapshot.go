@@ -251,14 +251,20 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	snapshotPath := layout.Home
 	rsp.SnapshotPath = snapshotPath
 	tmpSnapshotPath := layout.TmpHome
-	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
-	stepLog.Infof("Step 3: Creating snapshot at temporary path: %s", tmpSnapshotPath)
-
-	// NOCC:Path Traversal()
-	if err := os.RemoveAll(tmpSnapshotPath); err != nil {
-		stepLog.Warnf("Failed to remove existing temp directory: %v", err)
+	prevCleanupSnapshotObjects := cleanupSnapshotObjects
+	cleanupSnapshotObjects = func() {
+		layout.releaseMetadata(ctx)
+		prevCleanupSnapshotObjects()
+		layout.discardTmpDir()
+		if !layout.usesTmpRename() {
+			_ = os.RemoveAll(layout.Home) // NOCC:Path Traversal()
+		}
 	}
-	if err := layout.ensureTmp(); err != nil {
+	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
+	stepLog.Infof("Step 3: Creating snapshot at path: %s", layout.Home)
+
+	layout.resetTmpDir()
+	if err := layout.prepareWork(ctx); err != nil {
 		stepLog.Errorf("Failed to create snapshot dir: %v", err)
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create snapshot dir: %v", err)
@@ -296,8 +302,8 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	if err := s.executeCubeRuntimeSnapshot(ctx, sandboxID, spec, layout.MetaWork, memoryObject.DevPath, snapshotTypeFull); err != nil {
 		stepLog.Errorf("Failed to execute cube-runtime snapshot: %v", err)
 
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupSnapshotObjects()
+		layout.discardTmpDir()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to execute cube-runtime snapshot: %v", err)
 		return rsp, nil
@@ -306,8 +312,8 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 
 	if err := writeMemoryDevFile(layout.MemoryWork, memoryObject.DevPath); err != nil {
 		stepLog.Errorf("Failed to write memory.dev: %v", err)
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupSnapshotObjects()
+		layout.discardTmpDir()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to write memory.dev: %v", err)
 		return rsp, nil
@@ -316,8 +322,8 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	rootfsObject, err = storage.CommitRootfsFromBuildFor(ctx, backend, templateID)
 	if err != nil {
 		stepLog.Errorf("Failed to create template rootfs snapshot: %v", err)
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupSnapshotObjects()
+		layout.discardTmpDir()
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
 			rsp.Ret.RetCode = errorcode.ErrorCode_PreConditionFailed
 			rsp.Ret.RetMsg = fmt.Sprintf("template rootfs already exists: %v", err)
@@ -330,8 +336,8 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	if layout.DiskWork != layout.MetaWork {
 		if err := writeDiskDevFile(layout.DiskWork, rootfsObject.DevPath); err != nil {
 			stepLog.Errorf("Failed to write disk.dev: %v", err)
-			os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 			cleanupSnapshotObjects()
+			layout.discardTmpDir()
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to write disk.dev: %v", err)
 			return rsp, nil
@@ -353,8 +359,8 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	failTemporaryDestroy := func(retCode errorcode.ErrorCode, retMsg string) (*cubebox.AppSnapshotResponse, error) {
 		stepLog.Warn("Fallback: trying force destroy...")
 		forceDestroyCubebox()
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupSnapshotObjects()
+		layout.discardTmpDir()
 		rsp.Ret.RetCode = retCode
 		rsp.Ret.RetMsg = retMsg
 		return rsp, nil
@@ -372,32 +378,34 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	temporaryCubeboxDestroyed = true
 
 	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject); err != nil {
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
 		cleanupSnapshotObjects()
+		layout.discardTmpDir()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to deactivate snapshot objects: %v", err)
 		return rsp, nil
 	}
 
-	stepLog.Info("Step 6: Moving snapshot to final path...")
+	if layout.usesTmpRename() {
+		stepLog.Info("Step 6: Moving snapshot to final path...")
 
-	// NOCC:Path Traversal()
-	if err := os.RemoveAll(snapshotPath); err != nil {
-		stepLog.Warnf("Failed to remove existing snapshot directory: %v", err)
-	}
+		// NOCC:Path Traversal()
+		if err := os.RemoveAll(snapshotPath); err != nil {
+			stepLog.Warnf("Failed to remove existing snapshot directory: %v", err)
+		}
 
-	if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
-		stepLog.Errorf("Failed to move snapshot to final path: %v", err)
-		os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
-		cleanupSnapshotObjects()
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
-		return rsp, nil
+		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
+			stepLog.Errorf("Failed to move snapshot to final path: %v", err)
+			os.RemoveAll(tmpSnapshotPath) // NOCC:Path Traversal()
+			cleanupSnapshotObjects()
+			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+			rsp.Ret.RetMsg = fmt.Sprintf("failed to move snapshot: %v", err)
+			return rsp, nil
+		}
 	}
 	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
 		stepLog.Errorf("Failed to expose shim spec dir: %v", err)
-		os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		cleanupSnapshotObjects()
+		os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to expose shim spec dir: %v", err)
 		return rsp, nil
@@ -438,6 +446,8 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		RootfsKind:        rootfsObject.Kind,
 		MemoryVol:         memoryObject.Name,
 		MemoryKind:        memoryObject.Kind,
+		MetadataVol:       storage.S3MetadataCatalogVol(backend, templateID),
+		MetadataKind:      storage.S3MetadataCatalogKind(backend),
 		BuildRootfsVol:    storage.TemplateBuildRootfsName(templateID),
 		BuildRootfsKind:   storage.CowKindVolume,
 		RootfsSizeBytes:   rootfsObject.SizeBytes,
@@ -451,13 +461,7 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, err)
 	}
 
-	if raw, err := uploadRemoteUUIDsIfS3(ctx, backend, templateID); err != nil {
-		os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
-		cleanupSnapshotObjects()
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to export snapshot: %v", err)
-		return rsp, nil
-	} else {
+	if raw := uploadRemoteUUIDsIfS3(ctx, backend, templateID); raw != "" {
 		rsp.RemoteUuids = raw
 	}
 
