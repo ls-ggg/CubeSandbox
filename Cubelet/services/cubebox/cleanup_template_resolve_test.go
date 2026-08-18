@@ -100,7 +100,7 @@ func TestResolveCleanupRefsFallsBackToDeterministicOnCatalogMiss(t *testing.T) {
 	assert.Equal(t, "/legacy/fallback", snapPath)
 }
 
-func TestResolveCleanupRefsFindsS3CatalogWhenXFSMisses(t *testing.T) {
+func TestResolveCleanupRefsDoesNotScanOtherBackend(t *testing.T) {
 	templateID := "tpl-s3-on-xfs-req"
 	snapDir := filepath.Join(t.TempDir(), "s3", templateID)
 	require.NoError(t, storage.WriteSnapshotCatalogFor("s3", &storage.SnapshotCatalogEntry{
@@ -114,9 +114,9 @@ func TestResolveCleanupRefsFindsS3CatalogWhenXFSMisses(t *testing.T) {
 
 	refs, snapPath, err := resolveCleanupRefs(context.Background(), "xfs", templateID, nil, "")
 	require.NoError(t, err)
-	require.Len(t, refs, 2)
-	assert.Equal(t, "s3-rootfs", refs[0].Name)
-	assert.Equal(t, snapDir, snapPath)
+	require.Len(t, refs, 3)
+	assert.Equal(t, "tpl-"+templateID+"-rootfs", refs[0].Name)
+	assert.NotEqual(t, snapDir, snapPath)
 }
 
 func TestResolveCleanupRefsCatalogWithoutBuildRootfsStillCleansFromCatalog(t *testing.T) {

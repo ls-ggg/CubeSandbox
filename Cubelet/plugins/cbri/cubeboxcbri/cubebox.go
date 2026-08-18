@@ -188,7 +188,11 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 				logEntry.Errorf("check snapshot path failed: %s", "local run template is nil")
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, "local snapshot not exist")
 			}
-			paths, err := e.resolveSnapshotPaths(templateID, snapshotRestoreRawPath(ctx, flowOpts), flowOpts.ReqInfo)
+			rawPath, err := snapshotRestoreRawPath(ctx, flowOpts)
+			if err != nil {
+				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+			}
+			paths, err := e.resolveSnapshotPaths(templateID, rawPath, flowOpts.ReqInfo)
 			if err != nil {
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 			}
@@ -509,22 +513,24 @@ func resolveTemplateComponentPath(localTemplate *templatetypes.LocalRunTemplate,
 // though LocalRunTemplate is the original tpl-* (needed for kernel／image
 // EnsureCubeRunTemplate). Using the template 2C2000M path with pause
 // memory hangs shim Task.Create.
-func snapshotRestoreRawPath(ctx context.Context, flowOpts *workflow.CreateContext) string {
+func snapshotRestoreRawPath(ctx context.Context, flowOpts *workflow.CreateContext) (string, error) {
 	raw := ""
 	if flowOpts != nil && flowOpts.LocalRunTemplate != nil {
 		raw = strings.TrimSpace(flowOpts.LocalRunTemplate.Snapshot.Snapshot.Path)
 	}
 	if flowOpts == nil || !flowOpts.IsPauseResume() {
-		return raw
+		return raw, nil
 	}
 	snapID, ok := flowOpts.GetSnapshotTemplateID()
 	if !ok {
-		return raw
+		return "", fmt.Errorf("pause resume missing snapshot id")
 	}
-	if meta := pauseCatalogMetaDir(ctx, snapID, pauseResumeCatalogBackend(flowOpts)); meta != "" {
-		return meta
+	backend := pauseResumeCatalogBackend(flowOpts)
+	meta := pauseCatalogMetaDir(ctx, snapID, backend)
+	if meta == "" {
+		return "", fmt.Errorf("pause snapshot %s not found in %s catalog", snapID, backend)
 	}
-	return raw
+	return meta, nil
 }
 
 func pauseResumeCatalogBackend(flowOpts *workflow.CreateContext) string {
@@ -547,27 +553,24 @@ func pauseResumeCatalogBackend(flowOpts *workflow.CreateContext) string {
 	return b
 }
 
-func pauseCatalogMetaDir(ctx context.Context, snapID, preferred string) string {
-	seen := map[string]struct{}{}
-	for _, backend := range []string{preferred, cow.BackendXFS, cow.BackendS3} {
-		backend = strings.TrimSpace(backend)
-		if backend == "" {
-			continue
-		}
-		if _, ok := seen[backend]; ok {
-			continue
-		}
-		seen[backend] = struct{}{}
-		entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapID)
-		if err != nil || entry == nil {
-			continue
-		}
-		if meta := strings.TrimSpace(entry.MetaDir); meta != "" {
-			return meta
-		}
-		if home := strings.TrimSpace(entry.SnapshotPath); home != "" {
-			return filepath.Join(home, storage.SnapshotMetadataDir)
-		}
+func pauseCatalogMetaDir(ctx context.Context, snapID, backend string) string {
+	backend = strings.TrimSpace(backend)
+	if backend == "" {
+		backend = cow.BackendXFS
+	}
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return ""
+	}
+	entry, err := storage.GetLocalSnapshotFor(ctx, normalized, snapID)
+	if err != nil || entry == nil {
+		return ""
+	}
+	if meta := strings.TrimSpace(entry.MetaDir); meta != "" {
+		return meta
+	}
+	if home := strings.TrimSpace(entry.SnapshotPath); home != "" {
+		return filepath.Join(home, storage.SnapshotMetadataDir)
 	}
 	return ""
 }

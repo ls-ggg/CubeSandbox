@@ -465,13 +465,6 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-	if _, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID); errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
-		if other := otherCowBackend(backend); other != backend {
-			if _, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
-				backend = other
-			}
-		}
-	}
 	refs, snapshotPath, err := resolveCleanupRefs(ctx, backend, rsp.TemplateID, req.GetObjects(), req.GetSnapshotPath())
 	if err != nil {
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
@@ -521,13 +514,6 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 		return refs, ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, templateID)
-	if err != nil || entry == nil {
-		if other := otherCowBackend(backend); other != backend {
-			if alt, altErr := storage.GetLocalSnapshotFor(ctx, other, templateID); altErr == nil && alt != nil {
-				entry, err, backend = alt, nil, other
-			}
-		}
-	}
 	if err == nil && entry != nil {
 		refs := cubecowRefsFromCatalogEntry(templateID, entry)
 		snapshotPath := strings.TrimSpace(entry.SnapshotPath)
@@ -542,14 +528,6 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 		log.G(ctx).Warnf("CleanupTemplate %s: catalog miss; falling back to deterministic refs", templateID)
 	}
 	return storage.DefaultTemplateObjectRefs(templateID), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
-}
-
-func otherCowBackend(backend string) string {
-	normalized, err := resolveRequestStorageBackend(backend)
-	if err == nil && normalized == cow.BackendS3 {
-		return cow.BackendXFS
-	}
-	return cow.BackendS3
 }
 
 func ensureSnapshotCleanupPath(ctx context.Context, backend, templateID, snapshotPath string) string {

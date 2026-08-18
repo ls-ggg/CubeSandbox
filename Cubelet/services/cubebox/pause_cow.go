@@ -389,7 +389,7 @@ func (s *service) updateWithPauseCow(
 	}
 	if prev := replacedLivePauseSnapshotID(prevLiveSnap, snapID); prev != "" {
 		stepLog.Infof("pause replaced live snap %s with %s; CleanupTemplate previous", prev, snapID)
-		s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev, cleanupBackendForPauseSnap(backend, prev))
+		s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev, cleanupBackendForPauseSnap(backend))
 	}
 	return rsp, nil
 }
@@ -537,33 +537,31 @@ func firstPauseSnapshotID(candidates []string, allowCatalogMiss bool, backend st
 	return ""
 }
 
-func lookupPauseCatalog(id, preferred string) (*storage.SnapshotCatalogEntry, string) {
-	seen := map[string]struct{}{}
-	for _, backend := range []string{preferred, cow.BackendS3, cow.BackendXFS} {
-		backend = strings.TrimSpace(backend)
-		if backend == "" {
-			continue
-		}
-		if _, ok := seen[backend]; ok {
-			continue
-		}
-		seen[backend] = struct{}{}
-		entry, err := storage.GetLocalSnapshotFor(context.Background(), backend, id)
-		if err == nil && entry != nil {
-			return entry, backend
-		}
+func lookupPauseCatalog(id, backend string) (*storage.SnapshotCatalogEntry, string) {
+	backend = strings.TrimSpace(backend)
+	if backend == "" {
+		backend = cow.BackendXFS
 	}
-	return nil, preferred
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return nil, backend
+	}
+	entry, err := storage.GetLocalSnapshotFor(context.Background(), normalized, id)
+	if err != nil || entry == nil {
+		return nil, normalized
+	}
+	return entry, normalized
 }
 
-func cleanupBackendForPauseSnap(preferred, snapID string) string {
-	if _, used := lookupPauseCatalog(snapID, preferred); strings.TrimSpace(used) != "" {
-		return used
+func cleanupBackendForPauseSnap(preferred string) string {
+	if strings.TrimSpace(preferred) == "" {
+		return cow.BackendXFS
 	}
-	if strings.TrimSpace(preferred) != "" {
-		return preferred
+	normalized, err := cow.NormalizeBackend(preferred)
+	if err != nil {
+		return cow.BackendXFS
 	}
-	return cow.BackendXFS
+	return normalized
 }
 
 // pauseSnapIDToGCOnDestroy is the Destroy-time pause-snap GC decision.

@@ -295,7 +295,10 @@ func TestSnapshotRestoreRawPathPauseResumeUsesCatalogMetaDir(t *testing.T) {
 			},
 		},
 	}
-	got := snapshotRestoreRawPath(context.Background(), flowOpts)
+	got, err := snapshotRestoreRawPath(context.Background(), flowOpts)
+	if err != nil {
+		t.Fatalf("snapshotRestoreRawPath: %v", err)
+	}
 	if got != meta {
 		t.Fatalf("snapshotRestoreRawPath=%q want pause meta %q (not template %q)", got, meta, tplPath)
 	}
@@ -308,7 +311,11 @@ func TestSnapshotRestoreRawPathPauseResumeUsesCatalogMetaDir(t *testing.T) {
 		},
 		LocalRunTemplate: flowOpts.LocalRunTemplate,
 	}
-	if got := snapshotRestoreRawPath(context.Background(), fromTpl); got != tplPath {
+	got, err = snapshotRestoreRawPath(context.Background(), fromTpl)
+	if err != nil {
+		t.Fatalf("non-pause snapshotRestoreRawPath: %v", err)
+	}
+	if got != tplPath {
 		t.Fatalf("non-pause snapshotRestoreRawPath=%q want template path %q", got, tplPath)
 	}
 }
