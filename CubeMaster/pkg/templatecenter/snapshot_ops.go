@@ -121,14 +121,20 @@ func SubmitSandboxSnapshot(ctx context.Context, requestID, sandboxID, hostID, ho
 	}
 	nodeID := strings.TrimSpace(hostID)
 	nodeIP := strings.TrimSpace(hostIP)
-	normalizedBackend, err := constants.NormalizeSnapshotBackend(backend)
-	if err != nil {
-		return nil, err
-	}
 
 	originReq, err := loadSandboxCreateRequestFn(ctx, sandboxID)
 	if err != nil {
 		return nil, err
+	}
+	// Client-supplied backend is ignored. Ordinary snapshot follows the
+	// sandbox spec Master persisted at create (itself inherited from the
+	// template).
+	normalizedBackend, err := resolvePersistedCreateBackend(originReq)
+	if err != nil {
+		return nil, err
+	}
+	if client := strings.TrimSpace(backend); client != "" && !strings.EqualFold(client, normalizedBackend) {
+		log.G(ctx).Infof("snapshot create ignores client backend=%s; using persisted backend=%s sandbox=%s", client, normalizedBackend, sandboxID)
 	}
 	if originReq.Request == nil {
 		originReq.Request = &sandboxtypes.Request{RequestID: requestID}
@@ -499,14 +505,17 @@ func RollbackSandboxToSnapshot(ctx context.Context, requestID, sandboxID, snapsh
 		// snapshots are not resizable, so the restored rootfs must keep the
 		// committed snapshot size instead of expanding to the current spec size.
 		desiredSize = 0
-		backend = strings.TrimSpace(backend)
-		if backend == "" {
-			backend = strings.TrimSpace(rec.Backend)
-		}
+		// Client-supplied backend is ignored. Rollback follows the snapshot
+		// row, then the sandbox spec Master persisted at create.
+		clientBackend := strings.TrimSpace(backend)
+		backend = strings.TrimSpace(rec.Backend)
 		if backend == "" {
 			if createReq, loadErr := loadSandboxCreateRequest(ctx, sandboxID); loadErr == nil {
 				backend = strings.TrimSpace(storageBackendFromCreate(createReq))
 			}
+		}
+		if clientBackend != "" && !strings.EqualFold(clientBackend, backend) {
+			log.G(ctx).Infof("snapshot rollback ignores client backend=%s; using persisted backend=%s snapshot=%s", clientBackend, backend, snapshotID)
 		}
 		payload, err := marshalSnapshotRollbackRequest(requestID, sandboxID, snapshotID, nodeID, nodeIP, newGen, desiredSize, backend)
 		if err != nil {

@@ -31,16 +31,21 @@ import (
 
 var cowLookPath = exec.LookPath
 var initCowEngine = initCowEngineWithConfig
+var initS3CowEngine = initS3CowEngineWithConfig
 
 // StorageBackendCow is the canonical value of `storage_backend` for the
 // cubecow (reflink-only copy-on-write) backend. cubelet refuses to boot
 // when `storage_backend` is set to anything else under this build.
 const StorageBackendCow = "cubecow"
 
-// cowBackendReflink is the only backend `kind` cubecow now supports.
-// It is forwarded verbatim into the cubecow inline JSON payload and
-// matches the `BackendKind::Reflink` variant on the Rust side.
-const cowBackendReflink = "reflink"
+// cubecow backend.kind values. Cubelet starts one handle per kind
+// (xfs=reflink, s3=s3). Each handle gets its own JSON; cubecow selects
+// the engine from that handle's config. The S3 engine itself lives in
+// cubecow (someone else's PR); Cubelet only wraps two handles.
+const (
+	cowBackendReflink = "reflink"
+	cowBackendS3      = "s3"
+)
 
 // defaultVolumePluginBaseDir is the fallback parent directory that
 // plugin_volume Attach must mount volumes under when Config.VolumePluginBaseDir
@@ -123,15 +128,22 @@ type Config struct {
 	VolumePluginBaseDir string `toml:"volume_plugin_base_dir"`
 }
 
-// CowInlineConfig mirrors the cubecow `AppConfig` schema. cubecow is
-// reflink-only and cubelet always owns the cubecow init payload
-// (there is no external cubecow.toml fallback), so the only thing
-// users can tune through TOML is the `[log]` block. The reflink
-// backend's `root_dir` is derived from `data_path` and stamped onto
-// `Backend.Reflink` in PrepareCowInlineConfig.
+// CowInlineConfig mirrors the cubecow `AppConfig` schema. Cubelet owns
+// the cubecow init payload and starts one handle per backend.kind.
+// Users may tune `[log]` and `[cow.s3]` (s3lvol socket); reflink
+// `root_dir` and s3 `state_dir` are derived from `data_path`.
 type CowInlineConfig struct {
 	Log     CowLogConfig     `toml:"log"`
 	Backend CowBackendConfig `toml:"-"`
+	S3      CowS3UserConfig  `toml:"s3"`
+}
+
+// CowS3UserConfig is the operator-facing `[cow.s3]` block.
+type CowS3UserConfig struct {
+	SocketPath   *string `toml:"socket_path"`
+	StateDir     *string `toml:"state_dir"`
+	RPCTimeoutMS *uint64 `toml:"rpc_timeout_ms"`
+	SizePolicy   *string `toml:"size_policy"`
 }
 
 type CowLogConfig struct {
@@ -146,6 +158,16 @@ type CowLogConfig struct {
 type CowBackendConfig struct {
 	Kind    string `toml:"-"`
 	Reflink CowReflinkBackendConfig
+	S3      CowS3BackendConfig
+}
+
+// CowS3BackendConfig is the `[backend.s3]` payload stamped onto the
+// S3 cubecow handle.
+type CowS3BackendConfig struct {
+	SocketPath   *string
+	StateDir     *string
+	RPCTimeoutMS *uint64
+	SizePolicy   *string
 }
 
 // CowReflinkBackendConfig is the `[backend.reflink]` payload.
@@ -160,11 +182,22 @@ func (c *Config) BuildCowInitJSON() ([]byte, error) {
 	if c == nil {
 		return nil, fmt.Errorf("nil storage config")
 	}
+	return c.buildCowInitJSON(c.Cow.Backend)
+}
+
+func (c *Config) BuildS3CowInitJSON() ([]byte, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nil storage config")
+	}
+	return c.buildCowInitJSON(c.s3BackendConfig())
+}
+
+func (c *Config) buildCowInitJSON(backend CowBackendConfig) ([]byte, error) {
 	payload := map[string]any{}
 	if logBlock := c.Cow.Log.toMap(); len(logBlock) > 0 {
 		payload["log"] = logBlock
 	}
-	if backendBlock := c.Cow.Backend.toMap(); len(backendBlock) > 0 {
+	if backendBlock := backend.toMap(); len(backendBlock) > 0 {
 		payload["backend"] = backendBlock
 	}
 	return json.Marshal(payload)
@@ -236,7 +269,57 @@ func initCowEngineWithConfig(cfg *Config) (*cubecow.Engine, string, error) {
 		return nil, "", err
 	}
 	engine, err := cubecow.InitWithoutLoggingFromJSON(string(payload))
-	return engine, "inline storage.cow config", err
+	return engine, "inline storage.cow reflink handle", err
+}
+
+func initS3CowEngineWithConfig(cfg *Config) (*cubecow.Engine, string, error) {
+	if cfg == nil {
+		return nil, "", fmt.Errorf("nil storage config")
+	}
+	payload, err := cfg.BuildS3CowInitJSON()
+	if err != nil {
+		return nil, "", err
+	}
+	engine, err := cubecow.InitWithoutLoggingFromJSON(string(payload))
+	return engine, "inline storage.cow s3 handle", err
+}
+
+func (c *Config) s3BackendConfig() CowBackendConfig {
+	socket := defaultS3SocketPath
+	if c != nil && c.Cow.S3.SocketPath != nil && strings.TrimSpace(*c.Cow.S3.SocketPath) != "" {
+		socket = strings.TrimSpace(*c.Cow.S3.SocketPath)
+	}
+	stateDir := defaultS3AutoStateDir("")
+	if c != nil {
+		stateDir = defaultS3AutoStateDir(c.DataPath)
+		if c.Cow.S3.StateDir != nil && strings.TrimSpace(*c.Cow.S3.StateDir) != "" {
+			stateDir = strings.TrimSpace(*c.Cow.S3.StateDir)
+		}
+	}
+	out := CowBackendConfig{
+		Kind: cowBackendS3,
+		S3: CowS3BackendConfig{
+			SocketPath: &socket,
+			StateDir:   &stateDir,
+		},
+	}
+	if c != nil && c.Cow.S3.RPCTimeoutMS != nil {
+		out.S3.RPCTimeoutMS = c.Cow.S3.RPCTimeoutMS
+	}
+	if c != nil && c.Cow.S3.SizePolicy != nil && strings.TrimSpace(*c.Cow.S3.SizePolicy) != "" {
+		out.S3.SizePolicy = c.Cow.S3.SizePolicy
+	}
+	return out
+}
+
+const defaultS3SocketPath = "/var/run/s3lvol.sock"
+
+func defaultS3AutoStateDir(dataPath string) string {
+	work := stripStoragePluginDataDir(filepath.Clean(dataPath))
+	if work == "" || work == "." {
+		work = filepath.Join(constants.CubeConfigBasePath, "storage")
+	}
+	return filepath.Join(work, cow.BackendS3)
 }
 
 func (c CowLogConfig) toMap() map[string]any {
@@ -256,6 +339,18 @@ func (c CowBackendConfig) toMap() map[string]any {
 	if sub := c.Reflink.toMap(); len(sub) > 0 {
 		m["reflink"] = sub
 	}
+	if sub := c.S3.toMap(); len(sub) > 0 {
+		m["s3"] = sub
+	}
+	return m
+}
+
+func (c CowS3BackendConfig) toMap() map[string]any {
+	m := map[string]any{}
+	setIfNotNil(m, "socket_path", c.SocketPath)
+	setIfNotNil(m, "state_dir", c.StateDir)
+	setIfNotNil(m, "rpc_timeout_ms", c.RPCTimeoutMS)
+	setIfNotNil(m, "size_policy", c.SizePolicy)
 	return m
 }
 
@@ -320,7 +415,14 @@ func init() {
 					return nil, err
 				}
 				localStorage.cowEngine = eng
-				CubeLog.Infof("cubecow engine initialized from %s", initSource)
+				CubeLog.Infof("cubecow xfs handle initialized from %s", initSource)
+				s3eng, s3Source, s3err := initS3CowEngine(localStorage.config)
+				if s3err != nil {
+					CubeLog.Errorf("plugin %s s3 cubecow handle init fail:%v", constants.StorageID, s3err)
+				} else {
+					localStorage.s3CowEngine = s3eng
+					CubeLog.Infof("cubecow s3 handle initialized from %s", s3Source)
+				}
 			}
 
 			cubeboxAPIObj, err := ic.GetByID(constants.CubeStorePlugin, constants.CubeboxID.ID())

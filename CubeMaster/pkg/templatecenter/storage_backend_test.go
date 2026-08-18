@@ -86,10 +86,58 @@ func TestApplyStoredCreateBackendIgnoresHistoricalCubecow(t *testing.T) {
 	}
 }
 
-func TestInheritCreateBackendFromTemplateRejectsConflict(t *testing.T) {
+func TestApplyStoredCreateBackendPrefersDBColumn(t *testing.T) {
+	req := &sandboxtypes.CreateCubeSandboxReq{Backend: constants.SnapshotBackendXFS}
+	if err := applyStoredCreateBackend(req, constants.SnapshotBackendS3); err != nil {
+		t.Fatal(err)
+	}
+	if req.Backend != constants.SnapshotBackendS3 {
+		t.Fatalf("Backend=%q, want s3 from DB column", req.Backend)
+	}
+}
+
+func TestInheritCreateBackendFromTemplateUsesTemplateDB(t *testing.T) {
 	req := &sandboxtypes.CreateCubeSandboxReq{Backend: constants.SnapshotBackendS3}
 	tpl := &sandboxtypes.CreateCubeSandboxReq{Backend: constants.SnapshotBackendXFS}
-	if err := InheritCreateBackendFromTemplate(req, tpl); err == nil {
-		t.Fatal("expected conflict error")
+	if err := InheritCreateBackendFromTemplate(req, tpl); err != nil {
+		t.Fatal(err)
+	}
+	if req.Backend != constants.SnapshotBackendXFS {
+		t.Fatalf("Backend=%q, want xfs from template DB", req.Backend)
+	}
+}
+
+func TestInheritCreateBackendFromTemplateStripsRequestWhenTemplateEmpty(t *testing.T) {
+	req := &sandboxtypes.CreateCubeSandboxReq{
+		Backend: constants.SnapshotBackendS3,
+		Annotations: map[string]string{
+			constants.CubeAnnotationStorageBackend: constants.SnapshotBackendS3,
+		},
+	}
+	if err := InheritCreateBackendFromTemplate(req, &sandboxtypes.CreateCubeSandboxReq{}); err != nil {
+		t.Fatal(err)
+	}
+	if req.Backend != "" {
+		t.Fatalf("Backend=%q, want empty so historical template stays unpinned", req.Backend)
+	}
+	if _, ok := req.Annotations[constants.CubeAnnotationStorageBackend]; ok {
+		t.Fatal("client storage annotation must be cleared when template has no backend")
+	}
+}
+
+func TestResolvePersistedCreateBackendUsesSandboxSpec(t *testing.T) {
+	got, err := resolvePersistedCreateBackend(&sandboxtypes.CreateCubeSandboxReq{Backend: constants.SnapshotBackendS3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != constants.SnapshotBackendS3 {
+		t.Fatalf("backend=%q, want s3", got)
+	}
+	got, err = resolvePersistedCreateBackend(&sandboxtypes.CreateCubeSandboxReq{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != constants.SnapshotBackendXFS {
+		t.Fatalf("empty spec backend=%q, want xfs", got)
 	}
 }

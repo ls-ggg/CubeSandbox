@@ -14,15 +14,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow/s3"
 )
 
-// S3Cow is a mock S3-backed CoW Store. It is a copy of the XFS/reflink path
-// (same cubecow engine semantics) so cross-node S3 control-plane work can land
-// before a real remote backend exists. The original [XfsCow] implementation is
-// intentionally left untouched; do not merge mock-S3 logic back into it.
-//
-// create/activate/delete/list currently behave like XFS via the shared cubecow
-// engine. Upload/Fetch/Activate map to cubecow_export_snapshot /
-// cubecow_import_lvol / cubecow_activate_volume (upload is mocked while the
-// linked cubecow is still reflink).
+// S3Cow is the S3-backed CoW Store. It talks to a dedicated cubecow
+// handle started with backend.kind=s3 (same C API as XFS; cubecow
+// selects S3LVOL / RCOW from that handle's config). The original
+// [XfsCow] implementation is intentionally left untouched.
 type S3Cow struct {
 	engine cowEngine
 

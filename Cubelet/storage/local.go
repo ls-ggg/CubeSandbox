@@ -68,8 +68,9 @@ type local struct {
 	cubeboxAPI           cubes.CubeboxAPI
 	multiLock            *multilock.MultiLock
 	cowEngine            *cubecow.Engine
-	cowManager           cowVolumeManager // XFS / xfscow Store (default)
-	s3CowManager         cowVolumeManager // S3 Store (mock; coexists with XFS)
+	s3CowEngine          *cubecow.Engine
+	cowManager           cowVolumeManager // XFS / xfscow Store (reflink handle)
+	s3CowManager         cowVolumeManager // S3 Store (s3 cubecow handle)
 
 	// rcDB is the dedicated bbolt DB for the plugin-volume reference-count store.
 	// It is a sibling file to meta.db in the same db directory.
@@ -143,9 +144,9 @@ func (l *local) useCowStorage() bool {
 }
 
 func (l *local) ensureCowManager() error {
-	if l.cowEngine == nil {
+	if l.cowEngine == nil && l.s3CowEngine == nil {
 		// Tests inject Stores without a live cubecow engine. Production
-		// plugin init always sets the engine before this runs.
+		// plugin init always sets the engines before this runs.
 		if l.cowManager != nil || l.s3CowManager != nil {
 			return nil
 		}
@@ -154,12 +155,12 @@ func (l *local) ensureCowManager() error {
 		}
 		return nil
 	}
-	// Both backends are live at once; request `type` selects which Store to use.
-	if l.cowManager == nil {
+	// Each Store is bound to its own cubecow handle (kind=reflink vs kind=s3).
+	if l.cowManager == nil && l.cowEngine != nil {
 		l.cowManager = newCowVolumeManager(l.cowEngine)
 	}
-	if l.s3CowManager == nil {
-		l.s3CowManager = newS3CowVolumeManager(l.cowEngine)
+	if l.s3CowManager == nil && l.s3CowEngine != nil {
+		l.s3CowManager = newS3CowVolumeManager(l.s3CowEngine)
 	}
 	return nil
 }
@@ -168,11 +169,18 @@ func (l *local) resetCowNodeStorage() error {
 	if !l.useCowStorage() {
 		return nil
 	}
-	if l.cowEngine == nil {
+	if l.cowEngine == nil && l.s3CowEngine == nil {
 		return fmt.Errorf("cubecow engine not initialized")
 	}
-	if err := cowResetNodeStorage(l.cowEngine); err != nil {
-		return fmt.Errorf("reset cubecow node storage: %w", err)
+	if l.cowEngine != nil {
+		if err := cowResetNodeStorage(l.cowEngine); err != nil {
+			return fmt.Errorf("reset cubecow xfs storage: %w", err)
+		}
+	}
+	if l.s3CowEngine != nil {
+		if err := cowResetNodeStorage(l.s3CowEngine); err != nil {
+			return fmt.Errorf("reset cubecow s3 storage: %w", err)
+		}
 	}
 	l.Close()
 	return nil
@@ -199,15 +207,26 @@ func (l *local) cleanupCowStateOnDisk() error {
 }
 
 func (l *local) reinitCowEngine() error {
-	if !l.useCowStorage() || l.cowEngine != nil {
+	if !l.useCowStorage() {
 		return nil
 	}
-	engine, initSource, err := initCowEngine(l.config)
-	if err != nil {
-		return err
+	if l.cowEngine == nil {
+		engine, initSource, err := initCowEngine(l.config)
+		if err != nil {
+			return err
+		}
+		l.cowEngine = engine
+		CubeLog.Infof("cubecow xfs handle initialized from %s", initSource)
 	}
-	l.cowEngine = engine
-	CubeLog.Infof("cubecow engine initialized from %s", initSource)
+	if l.s3CowEngine == nil {
+		engine, initSource, err := initS3CowEngine(l.config)
+		if err != nil {
+			CubeLog.Errorf("s3 cubecow handle reinit fail:%v", err)
+		} else {
+			l.s3CowEngine = engine
+			CubeLog.Infof("cubecow s3 handle initialized from %s", initSource)
+		}
+	}
 	return nil
 }
 
@@ -397,6 +416,10 @@ func (l *local) Close() error {
 	if l.cowEngine != nil {
 		l.cowEngine.Close()
 		l.cowEngine = nil
+	}
+	if l.s3CowEngine != nil {
+		l.s3CowEngine.Close()
+		l.s3CowEngine = nil
 	}
 	l.cowManager = nil
 	l.s3CowManager = nil

@@ -63,10 +63,11 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string) 
 	// Resume success + failed pausesnap.Delete must not brick the next Pause.
 	clearStalePauseBindingIfRunning(ctx, req.RequestID, req.SandboxID, hostIP)
 
-	if strings.TrimSpace(req.Backend) == "" {
-		if spec, specErr := sandboxspec.Get(ctx, req.SandboxID); specErr == nil && spec != nil {
-			req.Backend = spec.Backend
-		}
+	// Client-supplied backend is ignored. Pause follows the sandbox spec
+	// Master persisted at create (itself inherited from the template).
+	req.Backend = ""
+	if spec, specErr := sandboxspec.Get(ctx, req.SandboxID); specErr == nil && spec != nil {
+		req.Backend = spec.Backend
 	}
 	snapID, err := pausesnap.Begin(ctx, req.SandboxID, nodeID, hostIP, req.InstanceType, req.Backend)
 	if err != nil {

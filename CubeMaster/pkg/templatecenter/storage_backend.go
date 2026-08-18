@@ -5,7 +5,6 @@
 package templatecenter
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -44,15 +43,24 @@ func stampCreateRequestBackend(req *sandboxtypes.CreateCubeSandboxReq, backend s
 	return nil
 }
 
-// applyStoredCreateBackend copies a stored template/snapshot backend onto
-// req when the request itself does not name one. Missing or invalid stored
-// values are ignored so old rows keep working.
+// clearCreateRequestBackend drops a client-supplied backend so later stages
+// cannot override the value Master persisted at template create.
+func clearCreateRequestBackend(req *sandboxtypes.CreateCubeSandboxReq) {
+	if req == nil {
+		return
+	}
+	req.Backend = ""
+	if req.Annotations != nil {
+		delete(req.Annotations, constants.CubeAnnotationStorageBackend)
+	}
+}
+
+// applyStoredCreateBackend writes the DB column onto req. The column is the
+// source of truth; request JSON / client fields are ignored when the row is
+// pinned. Missing or historical values leave the request unchanged.
 func applyStoredCreateBackend(req *sandboxtypes.CreateCubeSandboxReq, stored string) error {
 	if req == nil {
 		return nil
-	}
-	if raw := storageBackendFromCreate(req); raw != "" {
-		return stampCreateRequestBackend(req, raw)
 	}
 	if !isPinnedSnapshotBackend(stored) {
 		return nil
@@ -61,6 +69,12 @@ func applyStoredCreateBackend(req *sandboxtypes.CreateCubeSandboxReq, stored str
 		return nil
 	}
 	return nil
+}
+
+// resolvePersistedCreateBackend returns the xfs|s3 backend Master already
+// stored on a sandbox/template create request. Empty input becomes xfs.
+func resolvePersistedCreateBackend(req *sandboxtypes.CreateCubeSandboxReq) (string, error) {
+	return constants.NormalizeSnapshotBackend(storageBackendFromCreate(req))
 }
 
 func isPinnedSnapshotBackend(raw string) bool {
@@ -101,32 +115,14 @@ func cleanupBackendFromTargets(targets *templateCleanupTargets) string {
 	return ""
 }
 
-// InheritCreateBackendFromTemplate copies the template backend onto a
-// sandbox create when the request omitted it. An explicit request backend
-// that conflicts with a pinned template backend is rejected. Both empty
-// leaves the request unchanged.
+// InheritCreateBackendFromTemplate stamps the template's persisted backend
+// onto the create request. Clients may only choose backend when creating a
+// template; later stages always follow CubeMaster DB. A request-supplied
+// backend is discarded. Both empty leaves the request unchanged.
 func InheritCreateBackendFromTemplate(req, templateReq *sandboxtypes.CreateCubeSandboxReq) error {
 	if req == nil {
 		return nil
 	}
-	requestRaw := storageBackendFromCreate(req)
-	templateRaw := storageBackendFromCreate(templateReq)
-	if requestRaw == "" {
-		return stampCreateRequestBackend(req, templateRaw)
-	}
-	if templateRaw == "" {
-		return stampCreateRequestBackend(req, requestRaw)
-	}
-	requested, err := constants.NormalizeSnapshotBackend(requestRaw)
-	if err != nil {
-		return err
-	}
-	templateBackend, err := constants.NormalizeSnapshotBackend(templateRaw)
-	if err != nil {
-		return stampCreateRequestBackend(req, requestRaw)
-	}
-	if requested != templateBackend {
-		return fmt.Errorf("backend %q does not match template backend %q", requested, templateBackend)
-	}
-	return stampCreateRequestBackend(req, requested)
+	clearCreateRequestBackend(req)
+	return stampCreateRequestBackend(req, storageBackendFromCreate(templateReq))
 }

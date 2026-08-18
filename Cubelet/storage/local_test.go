@@ -819,13 +819,16 @@ func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 
 	oldReset := cowResetNodeStorage
 	oldInit := initCowEngine
+	oldS3Init := initS3CowEngine
 	t.Cleanup(func() {
 		cowResetNodeStorage = oldReset
 		initCowEngine = oldInit
+		initS3CowEngine = oldS3Init
 	})
 
 	resetCalls := 0
 	newEngine := &cubecow.Engine{}
+	newS3Engine := &cubecow.Engine{}
 	cowResetNodeStorage = func(engine *cubecow.Engine) error {
 		resetCalls++
 		assert.Same(t, oldEngine, engine)
@@ -835,11 +838,17 @@ func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 		assert.Same(t, cfg, got)
 		return newEngine, "test-config", nil
 	}
+	initS3CowEngine = func(got *Config) (*cubecow.Engine, string, error) {
+		assert.Same(t, cfg, got)
+		return newS3Engine, "test-s3-config", nil
+	}
 
 	require.NoError(t, s.Init(context.Background(), nil))
 	assert.Equal(t, 1, resetCalls)
 	assert.Same(t, newEngine, s.cowEngine)
+	assert.Same(t, newS3Engine, s.s3CowEngine)
 	assert.NotNil(t, s.cowManager)
+	assert.NotNil(t, s.s3CowManager)
 
 	_, err := os.Stat(staleVolumes)
 	assert.True(t, os.IsNotExist(err))
@@ -1976,6 +1985,49 @@ func TestValidateCowStartupDepsReportsMissingCommands(t *testing.T) {
 	err := cfg.validateCowStartupDeps()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "losetup")
+}
+
+func TestBuildS3CowInitJSONUsesS3Kind(t *testing.T) {
+	cfg := &Config{
+		DataPath: "/var/lib/cubelet/io.cubelet.internal.v1.storage",
+		Cow: CowInlineConfig{
+			Log: CowLogConfig{Level: stringPtr("debug")},
+			S3: CowS3UserConfig{
+				SocketPath: stringPtr("/tmp/s3lvol.sock"),
+			},
+		},
+	}
+
+	raw, err := cfg.BuildS3CowInitJSON()
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	backendCfg, ok := payload["backend"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, cowBackendS3, backendCfg["kind"])
+	s3Cfg, ok := backendCfg["s3"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "/tmp/s3lvol.sock", s3Cfg["socket_path"])
+	assert.Equal(t, "/var/lib/cubelet/s3", s3Cfg["state_dir"])
+}
+
+func TestEnsureCowManagerBindsSeparateHandles(t *testing.T) {
+	xfsEng := &cubecow.Engine{}
+	s3Eng := &cubecow.Engine{}
+	s := &local{
+		config:      &Config{StorageBackend: StorageBackendCow},
+		cowEngine:   xfsEng,
+		s3CowEngine: s3Eng,
+	}
+	require.NoError(t, s.ensureCowManager())
+	xfs, ok := s.cowManager.(*XfsCow)
+	require.True(t, ok)
+	assert.Same(t, xfsEng, xfs.engine)
+	s3, ok := s.s3CowManager.(*S3Cow)
+	require.True(t, ok)
+	assert.Same(t, s3Eng, s3.engine)
+	assert.NotSame(t, xfs.engine, s3.engine)
 }
 
 func TestPrepareCowInlineConfigStampsBackendDefaults(t *testing.T) {
