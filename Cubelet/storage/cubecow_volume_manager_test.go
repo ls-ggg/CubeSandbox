@@ -68,7 +68,9 @@ func (f *fakeCowEngine) CreateSnapshot(sourceName, snapshotName string, activate
 		return f.createSnapshotPath, f.createSnapshotErr
 	}
 	path := f.createSnapshotPath
-	if path == "" {
+	// activate=false may return an empty path (template rootfs commit);
+	// only invent a mapper path when activation was requested.
+	if path == "" && activate {
 		path = "/dev/mapper/" + snapshotName
 	}
 	if f.volumeInfos == nil {

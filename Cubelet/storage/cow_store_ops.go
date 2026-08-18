@@ -85,9 +85,10 @@ func FetchSnapshot(ctx context.Context, backend, snapshotID string, uuids *cow.R
 }
 
 // ActivateSnapshot opens a local snapshot's cubecow objects on the Store
-// for backend. Missing objects fail; there is no mock remote ingest.
-// Does not start a sandbox. Pause Resume then starts on these objects
-// in place; ordinary snapshot Create still clones after activate.
+// for backend. Missing objects fail; this does not fetch from remote
+// (use FetchSnapshot for that). Does not start a sandbox. Pause Resume
+// then starts on these objects in place; ordinary snapshot Create still
+// clones after activate.
 func ActivateSnapshot(ctx context.Context, backend, snapshotID string) error {
 	activator, err := requireCowActivator(backend)
 	if err != nil {

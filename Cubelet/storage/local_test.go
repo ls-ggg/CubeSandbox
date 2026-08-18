@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,6 +50,25 @@ func makeTestConfig(t *testing.T) *Config {
 		PoolWorkers:               2,
 		PoolTriggerIntervalInMs:   1,
 	}
+}
+
+// probeReflink returns nil when the filesystem under dir supports cp --reflink=always.
+func probeReflink(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	src := filepath.Join(dir, ".reflink-probe-src")
+	dst := filepath.Join(dir, ".reflink-probe-dst")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		return err
+	}
+	defer os.Remove(src)
+	defer os.Remove(dst)
+	cmd := exec.Command("cp", "--reflink=always", src, dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func TestParam(t *testing.T) {
@@ -611,6 +632,11 @@ func TestPollImmediateInfiniteWithContext(t *testing.T) {
 
 func TestSnapCreateCubebox(t *testing.T) {
 	cfg := makeTestConfig(t)
+	// Template Create→Destroy promotes tmpPool→poolFormat only for reflink pools.
+	cfg.PoolType = cp_reflink_type
+	if err := probeReflink(cfg.DataPath); err != nil {
+		t.Skipf("reflink not available under %s: %v", cfg.DataPath, err)
+	}
 
 	s := &local{}
 	s.config = cfg
@@ -1298,6 +1324,13 @@ func TestCleanupCreateResultRemovesHostDirSandboxPath(t *testing.T) {
 	err := s.cleanupCreateResult(context.Background(), &StorageInfo{
 		SandboxID: "hostdir-sb",
 		Volumes:   map[string]*BackendFileInfo{},
+		HostDirBackendInfos: map[string]*HostDirBackendInfo{
+			"volume/hostdir-0": {
+				VolumeName: "volume",
+				ShareDir:   filepath.Join(hostDirBasePath, "hostdir-sb"),
+				BindPath:   sandboxDir,
+			},
+		},
 	})
 	require.NoError(t, err)
 	require.NoDirExists(t, filepath.Join(hostDirBasePath, "hostdir-sb"))

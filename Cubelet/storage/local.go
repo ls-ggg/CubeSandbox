@@ -950,6 +950,10 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 	if opts == nil || opts.ReqInfo == nil || opts.IsCreateSnapshot() {
 		return "", nil
 	}
+	// Emptydir / file pools do not use the cubecow snapshot catalog.
+	if !l.useCowStorage() {
+		return "", nil
+	}
 	if _, ok := opts.GetSnapshotTemplateID(); !ok {
 		return "", nil
 	}
@@ -1335,6 +1339,11 @@ func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.Crea
 
 	p, ok := l.poolFormat.Load(templateID)
 	if !ok {
+		// Template may still be in the create-time tmp pool until the
+		// creating sandbox is Destroy'd and promoted into poolFormat.
+		p, ok = l.tmpPoolFormat.Load(templateID)
+	}
+	if !ok {
 		return fmt.Errorf("failed to get v1 template storage pool for templateID %s", templateID)
 	}
 	pool := p.(Pool)
@@ -1550,6 +1559,15 @@ func (l *local) destroyCubeBoxTemplateBase(ctx context.Context, info *StorageInf
 		return err
 	}
 	l.poolFormat.Store(templateID, p)
+	// The creating sandbox's EmptyDir volume points at the template base.
+	// Keep that file for the pool; do not let destroyDefaultMediumVolumes
+	// atomicDelete it afterward.
+	for name, v := range info.Volumes {
+		if v == nil || v.VolumeName != "" {
+			continue
+		}
+		delete(info.Volumes, name)
+	}
 	return nil
 }
 
