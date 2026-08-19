@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -254,8 +255,12 @@ func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 		},
 	}
 	useTestCowStorage(t, engine)
+	home := t.TempDir()
+	require.NoError(t, EnsureSnapshotPackage(cow.BackendS3, home))
 	require.NoError(t, WriteSnapshotCatalogFor(cow.BackendS3, &SnapshotCatalogEntry{
 		SnapshotID:   "snap-1",
+		SnapshotPath: home,
+		MetaDir:      filepath.Join(home, SnapshotMetadataDir),
 		RootfsVol:    "tpl-snap-1-rootfs",
 		RootfsKind:   cowKindSnapshot,
 		MemoryVol:    "tpl-snap-1-memory",

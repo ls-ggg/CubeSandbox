@@ -6,8 +6,6 @@ package cubebox
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"sort"
 	"testing"
 	"time"
