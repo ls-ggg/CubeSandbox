@@ -727,8 +727,11 @@ func formatS3MetadataBaseDeviceImpl(devicePath string) error {
 	if devicePath == "" {
 		return fmt.Errorf("s3 metadata base device path is required")
 	}
+	// Use 4096-byte blocks: s3lvol NVMe devices typically expose 4K
+	// physical/logical sectors, and mkfs.ext4 -b 1024 fails with
+	// "Invalid argument while setting blocksize; too small for device".
 	cmds := [][]string{
-		{"mkfs.ext4", "-F", "-O", "^has_journal", "-b", "1024", devicePath},
+		{"mkfs.ext4", "-F", "-O", "^has_journal", "-b", "4096", devicePath},
 	}
 	for _, cmd := range cmds {
 		if _, stderr, err := utils.ExecV(cmd, cmdTimeout); err != nil {
