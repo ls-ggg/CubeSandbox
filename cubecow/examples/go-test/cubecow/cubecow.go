@@ -350,7 +350,28 @@ func (e *Engine) CreateSnapshot(sourceName, snapshotName string) (string, error)
 	// Activate the snapshot so callers immediately get a usable device
 	// path. Consumers that want a metadata-only snapshot should pass
 	// `false` here and later invoke `cubecow_activate_volume`.
-	rc := C.cubecow_create_snapshot(e.ptr, cSource, cSnap, C.bool(true), &cDevicePath)
+	rc := C.cubecow_create_snapshot_from_volume(e.ptr, cSource, cSnap, C.bool(true), &cDevicePath)
+	if rc != 0 {
+		return "", makeError(rc)
+	}
+	devicePath := C.GoString(cDevicePath)
+	C.cubecow_free_string(cDevicePath)
+	return devicePath, nil
+}
+
+// CreateVolumeFromSnapshot derives a writable, data-independent volume
+// from an existing snapshot. The resulting volume is auto-activated;
+// its device path is returned on success. Writes to the returned
+// volume do not propagate back into the source snapshot, and deleting
+// the source snapshot afterwards does not affect the clone.
+func (e *Engine) CreateVolumeFromSnapshot(sourceSnapshot, volumeName string) (string, error) {
+	cSource := C.CString(sourceSnapshot)
+	defer C.free(unsafe.Pointer(cSource))
+	cVol := C.CString(volumeName)
+	defer C.free(unsafe.Pointer(cVol))
+
+	var cDevicePath *C.char
+	rc := C.cubecow_create_volume_from_snapshot(e.ptr, cSource, cVol, &cDevicePath)
 	if rc != 0 {
 		return "", makeError(rc)
 	}

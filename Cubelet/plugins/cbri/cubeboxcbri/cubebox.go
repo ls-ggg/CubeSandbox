@@ -196,25 +196,43 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 				return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 			}
 			backend := pauseResumeCatalogBackend(flowOpts)
-			metaMount := filepath.Join(paths.Base, storage.SnapshotMetadataDir)
 			if flowOpts.IsPauseResume() {
-				// Resume: use the metadata disk Pause already created.
+				// Resume: clone sealed metadata snap → RW volume, then mount
+				// (MountS3MetadataAt never activates the package snap for IO).
+				metaMount := filepath.Join(paths.Base, storage.SnapshotMetadataDir)
 				if err := storage.MountS3MetadataAt(ctx, backend, templateID, metaMount); err != nil {
 					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 				}
+				snapBasePath = paths.Base
+				snapSpecPath = paths.Spec
 			} else {
-				// Create from template／snapshot: clone that package's
-				// metadata disk into a sandbox-private copy.
+				// Create from template／snapshot: private metadata volume
+				// mounted under the sandbox-owned package path — never on
+				// the parent template metadata/ mount.
 				childID := strings.TrimSpace(flowOpts.GetSandboxID())
 				if childID == "" {
 					childID = templateID
 				}
-				if err := storage.CloneS3MetadataFromParent(ctx, backend, templateID, childID, metaMount); err != nil {
-					return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+				snapBasePath = paths.Base
+				snapSpecPath = paths.Spec
+				if isS3CatalogCreateBackend(backend) {
+					sandboxHome := storage.SnapshotHome(backend, storage.SnapshotKindNormal, childID)
+					metaMount := filepath.Join(sandboxHome, storage.SnapshotMetadataDir)
+					if err := storage.CloneS3MetadataFromParent(ctx, backend, templateID, childID, metaMount); err != nil {
+						return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+					}
+					if err := storage.EnsureShimSpecDirLink(sandboxHome, paths.ResDir); err != nil {
+						return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+					}
+					snapBasePath = sandboxHome
+					snapSpecPath = filepath.Join(sandboxHome, paths.ResDir)
+				} else {
+					metaMount := filepath.Join(paths.Base, storage.SnapshotMetadataDir)
+					if err := storage.CloneS3MetadataFromParent(ctx, backend, templateID, childID, metaMount); err != nil {
+						return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
+					}
 				}
 			}
-			snapBasePath = paths.Base
-			snapSpecPath = paths.Spec
 
 			kernelPath, imagePath, err := e.resolveSnapshotRuntimeArtifacts(snapSpecPath, flowOpts.LocalRunTemplate)
 			if err != nil {
@@ -563,6 +581,11 @@ func pauseResumeCatalogBackend(flowOpts *workflow.CreateContext) string {
 		return cow.BackendXFS
 	}
 	return b
+}
+
+func isS3CatalogCreateBackend(backend string) bool {
+	normalized, err := cow.NormalizeBackend(backend)
+	return err == nil && normalized == cow.BackendS3
 }
 
 func pauseCatalogMetaDir(ctx context.Context, snapID, preferred string) string {

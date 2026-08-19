@@ -58,7 +58,8 @@ func snapshotKindDirForRequest(backend, kind, requested string) string {
 
 // snapshotWorkLayout is the on-disk package for one Pause／Commit／AppSnapshot.
 // Both backends use <work>/<backend>/{snapshots|pause-snapshots}/<id>/.
-// S3 adds memory／disk next to metadata; XFS keeps files in xfs/objects.
+// S3 keeps memory next to metadata (disk/ is an empty package placeholder);
+// XFS keeps files in xfs/objects and shares MetaWork for package metadata.
 type snapshotWorkLayout struct {
 	Backend      string
 	Kind         string
@@ -68,10 +69,8 @@ type snapshotWorkLayout struct {
 	ValidateBase string
 	MetaDir      string
 	MemoryDir    string
-	DiskDir      string
 	MetaWork     string
 	MemoryWork   string
-	DiskWork     string
 }
 
 func prepareSnapshotWorkLayout(backend, kind, snapshotID, requestedDir, specDir string) (snapshotWorkLayout, error) {
@@ -105,14 +104,10 @@ func prepareSnapshotWorkLayout(backend, kind, snapshotID, requestedDir, specDir 
 		layout.TmpHome = home
 		layout.MetaWork = layout.MetaDir
 		layout.MemoryDir = filepath.Join(home, storage.SnapshotMemoryDir)
-		layout.DiskDir = filepath.Join(home, storage.SnapshotDiskDir)
 		layout.MemoryWork = layout.MemoryDir
-		layout.DiskWork = layout.DiskDir
 	} else {
 		layout.MemoryDir = layout.MetaDir
-		layout.DiskDir = layout.MetaDir
 		layout.MemoryWork = layout.MetaWork
-		layout.DiskWork = layout.MetaWork
 	}
 	for _, p := range []string{layout.Home, layout.TmpHome} {
 		if _, err := pathutil.ValidatePathUnderBase(kindRoot, p); err != nil {

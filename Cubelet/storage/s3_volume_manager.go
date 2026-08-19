@@ -89,38 +89,39 @@ func (m *S3Cow) CreateSandboxRootfsFromTemplate(ctx context.Context, sandboxID, 
 
 func (m *S3Cow) RollbackDeriveNewGen(ctx context.Context, sandboxID, snapshotRootfsVol string, gen uint32, desiredSizeBytes uint64) (*cowVolume, error) {
 	if snapshotRootfsVol == "" {
-		return nil, fmt.Errorf("snapshot rootfs volume is required")
+		return nil, fmt.Errorf("snapshot rootfs is required")
 	}
-	snapshotName := fmt.Sprintf("sb-%s-rootfs-gen%d", sandboxID, gen)
-	devPath, err := m.createOrResolveSnapshotPathFromSource(ctx, snapshotRootfsVol, snapshotName)
+	// S3: sandbox rootfs is a RW volume cloned from a RO package snapshot.
+	volumeName := fmt.Sprintf("sb-%s-rootfs-gen%d", sandboxID, gen)
+	devPath, err := m.createOrResolveVolumeFromSnapshot(ctx, snapshotRootfsVol, volumeName)
 	if err != nil {
 		return nil, err
 	}
-	resized, err := m.resizeSnapshotIfTooSmall(snapshotName, desiredSizeBytes)
+	resized, err := m.resizeVolumeIfTooSmall(volumeName, desiredSizeBytes)
 	if err != nil {
 		return nil, err
 	}
 	if resized {
-		devPath, err = m.ResolveDevPath(ctx, snapshotName, cowKindSnapshot)
+		devPath, err = m.ResolveDevPath(ctx, volumeName, cowKindVolume)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return newCowVolume(snapshotName, cowKindSnapshot, gen, devPath), nil
+	return newCowVolume(volumeName, cowKindVolume, gen, devPath), nil
 }
 
-func (m *S3Cow) resizeSnapshotIfTooSmall(snapshotName string, desiredSizeBytes uint64) (bool, error) {
+func (m *S3Cow) resizeVolumeIfTooSmall(volumeName string, desiredSizeBytes uint64) (bool, error) {
 	if desiredSizeBytes == 0 {
 		return false, nil
 	}
-	info, err := m.engine.GetVolumeInfo(snapshotName)
+	info, err := m.engine.GetVolumeInfo(volumeName)
 	if err != nil {
 		return false, err
 	}
 	if info == nil || info.SizeBytes >= desiredSizeBytes {
 		return false, nil
 	}
-	if _, _, err := m.engine.ResizeVolume(snapshotName, desiredSizeBytes); err != nil {
+	if _, _, err := m.engine.ResizeVolume(volumeName, desiredSizeBytes); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -161,29 +162,19 @@ func (m *S3Cow) CreateMemoryVolume(ctx context.Context, templateID string, sizeB
 	return newCowVolume(name, cowKindVolume, 0, devPath), nil
 }
 
-// CommitTemplateMemory clones an existing memory object (sourceName) into the
-// canonical template memory name for templateID via cubecow's reflink-backed
-// CreateSnapshot. Unlike CreateMemoryVolume which produces an empty volume,
-// this preserves the source memory bytes so the hypervisor can perform an
-// incremental (pagemap_anon) snapshot that only overwrites CoW anonymous
-// pages while keeping the rest of the base memory intact.
-//
-// activate=true is passed through so callers immediately receive a usable
-// device path. With the reflink backend, activation is effectively a no-op
-// (snapshots are addressable via their filesystem path).
+// CommitTemplateMemory derives a writable memory volume for templateID from
+// a RO memory snapshot (create_volume_from_snapshot). Source must be a
+// snapshot — seal prior package memory before using it as a clone base.
 func (m *S3Cow) CommitTemplateMemory(ctx context.Context, sourceName, templateID string, sizeBytes uint64) (*cowVolume, error) {
-	snapshotName := cowTemplateMemoryName(templateID)
-	devPath, err := m.engine.CreateSnapshot(sourceName, snapshotName, true)
+	volumeName := cowTemplateMemoryName(templateID)
+	devPath, err := m.createOrResolveVolumeFromSnapshot(ctx, sourceName, volumeName)
 	if err != nil {
-		if isCowSemantic(err, cubecow.SemAlreadyExists) {
-			return nil, fmt.Errorf("%w: name=%s kind=%s", ErrCowObjectAlreadyExists, snapshotName, cowKindSnapshot)
-		}
 		return nil, err
 	}
 	if sizeBytes > 0 {
-		info, infoErr := m.engine.GetVolumeInfo(snapshotName)
+		info, infoErr := m.engine.GetVolumeInfo(volumeName)
 		if infoErr != nil {
-			if cleanupErr := m.DeleteByKind(ctx, snapshotName, cowKindSnapshot); cleanupErr != nil {
+			if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
 				return nil, fmt.Errorf("%w (cleanup failed: %v)", infoErr, cleanupErr)
 			}
 			return nil, infoErr
@@ -193,21 +184,21 @@ func (m *S3Cow) CommitTemplateMemory(ctx context.Context, sourceName, templateID
 			actual = info.SizeBytes
 		}
 		if actual < sizeBytes {
-			sizeErr := fmt.Errorf("cloned memory snapshot %s size %d is smaller than requested %d", snapshotName, actual, sizeBytes)
-			if cleanupErr := m.DeleteByKind(ctx, snapshotName, cowKindSnapshot); cleanupErr != nil {
+			sizeErr := fmt.Errorf("cloned memory volume %s size %d is smaller than requested %d", volumeName, actual, sizeBytes)
+			if cleanupErr := m.DeleteByKind(ctx, volumeName, cowKindVolume); cleanupErr != nil {
 				return nil, fmt.Errorf("%w (cleanup failed: %v)", sizeErr, cleanupErr)
 			}
 			return nil, sizeErr
 		}
 	}
-	resolvedPath, err := m.ResolveDevPath(ctx, snapshotName, cowKindSnapshot)
+	resolvedPath, err := m.ResolveDevPath(ctx, volumeName, cowKindVolume)
 	if err != nil {
 		return nil, err
 	}
 	if resolvedPath != "" {
 		devPath = resolvedPath
 	}
-	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
+	return newCowVolume(volumeName, cowKindVolume, 0, devPath), nil
 }
 
 func (m *S3Cow) createInitializedTemplateVolume(ctx context.Context, name string, sizeBytes uint64) (*cowVolume, error) {
@@ -233,7 +224,9 @@ func (m *S3Cow) createTemplateVolumePath(name string, sizeBytes uint64) (string,
 }
 
 func (m *S3Cow) createTemplateSnapshotPath(sourceName, snapshotName string) (string, error) {
-	devPath, err := m.engine.CreateSnapshot(sourceName, snapshotName, false)
+	// Leave inactive: restore resolves device paths via catalog vol name +
+	// ResolveDevPath, not a host-local path baked into the package.
+	devPath, err := m.engine.CreateSnapshotFromVolume(sourceName, snapshotName, false)
 	if err != nil {
 		if isCowSemantic(err, cubecow.SemAlreadyExists) {
 			return "", fmt.Errorf("%w: name=%s kind=%s", ErrCowObjectAlreadyExists, snapshotName, cowKindSnapshot)
@@ -267,8 +260,22 @@ func (m *S3Cow) ensureVolumeSizeAtLeast(ctx context.Context, name string, reques
 	return nil
 }
 
+func (m *S3Cow) createOrResolveVolumeFromSnapshot(ctx context.Context, sourceSnapshot, volumeName string) (string, error) {
+	devPath, err := m.engine.CreateVolumeFromSnapshot(sourceSnapshot, volumeName)
+	if err != nil {
+		if !isCowSemantic(err, cubecow.SemAlreadyExists) {
+			return "", err
+		}
+		devPath, err = m.ResolveDevPath(ctx, volumeName, cowKindVolume)
+		if err != nil {
+			return "", err
+		}
+	}
+	return devPath, nil
+}
+
 func (m *S3Cow) createOrResolveSnapshotPathFromSource(ctx context.Context, sourceName, snapshotName string) (string, error) {
-	devPath, err := m.engine.CreateSnapshot(sourceName, snapshotName, true)
+	devPath, err := m.engine.CreateSnapshotFromVolume(sourceName, snapshotName, true)
 	if err != nil {
 		if !isCowSemantic(err, cubecow.SemAlreadyExists) {
 			return "", err

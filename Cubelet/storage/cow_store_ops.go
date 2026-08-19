@@ -63,7 +63,8 @@ func SnapshotUploadStatus(ctx context.Context, backend, snapshotID string) (*cow
 	return uploader.UploadStatus(ctx, snapshotID)
 }
 
-// FetchSnapshot materializes remote_uuids (cubecow_import_lvol).
+// FetchSnapshot materializes remote_uuids via cubecow_import_lvol into RW
+// volumes (derived from the remote snapshots), ready for Resume／create.
 // activate=true opens the block device after fetch.
 func FetchSnapshot(ctx context.Context, backend, snapshotID string, uuids *cow.RemoteUUIDs, activate bool) error {
 	normalized, err := cow.NormalizeBackend(backend)
@@ -86,9 +87,8 @@ func FetchSnapshot(ctx context.Context, backend, snapshotID string, uuids *cow.R
 
 // ActivateSnapshot opens a local snapshot's cubecow objects on the Store
 // for backend. Missing objects fail; this does not fetch from remote
-// (use FetchSnapshot for that). Does not start a sandbox. Pause Resume
-// then starts on these objects in place; ordinary snapshot Create still
-// clones after activate.
+// (use FetchSnapshot for that). Does not start a sandbox. Callers decide
+// when to activate versus clone-to-volume first.
 func ActivateSnapshot(ctx context.Context, backend, snapshotID string) error {
 	activator, err := requireCowActivator(backend)
 	if err != nil {

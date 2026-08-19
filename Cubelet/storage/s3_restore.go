@@ -15,7 +15,8 @@ import (
 
 // Activate implements [cow.Activator]. Opens cubecow objects that
 // already exist locally. Missing objects fail — there is no remote ingest.
-// Does not start a sandbox.
+// Does not start a sandbox. Callers decide which package objects to open
+// (via catalog／refs); this method does not apply role-specific policy.
 func (m *S3Cow) Activate(ctx context.Context, snapshotID string) error {
 	return activateStoreObjects(ctx, m, cow.BackendS3, snapshotID)
 }
@@ -83,7 +84,7 @@ func activateObjectRefs(ctx context.Context, backend, snapshotID string) []CowOb
 			}
 			refs = append(refs, CowObjectRef{Name: name, Kind: kind, Role: "metadata"})
 		} else if isS3CatalogBackend(backend) {
-			if meta := S3MetadataVolumeName(entry.SnapshotID); meta != "" && !IsS3MetadataBaseName(meta) {
+			if meta := S3MetadataSnapshotName(entry.SnapshotID); meta != "" && !IsS3MetadataBaseName(meta) {
 				refs = append(refs, CowObjectRef{Name: meta, Kind: cowKindSnapshot, Role: "metadata"})
 			}
 		}
@@ -96,7 +97,7 @@ func activateObjectRefs(ctx context.Context, backend, snapshotID string) []CowOb
 		{Name: cowTemplateMemoryName(snapshotID), Kind: cowKindVolume, Role: "memory"},
 	}
 	if isS3CatalogBackend(backend) {
-		if meta := S3MetadataVolumeName(snapshotID); meta != "" && !IsS3MetadataBaseName(meta) {
+		if meta := S3MetadataSnapshotName(snapshotID); meta != "" && !IsS3MetadataBaseName(meta) {
 			refs = append(refs, CowObjectRef{Name: meta, Kind: cowKindSnapshot, Role: "metadata"})
 		}
 	}

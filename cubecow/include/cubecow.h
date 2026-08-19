@@ -235,7 +235,7 @@ int32_t cubecow_list_volumes(
  * Regardless of `activate`, the snapshot is identified by snapshot_name
  * for every subsequent operation.
  */
-int32_t cubecow_create_snapshot(
+int32_t cubecow_create_snapshot_from_volume(
     CubecowEngineHandle engine,
     const char* source_name,
     const char* snapshot_name,
@@ -307,6 +307,21 @@ int32_t cubecow_import_lvol(
     CubecowEngineHandle engine,
     const char* lvol_name,
     const char* export_uuid,
+    char** out_device_path);
+
+/*
+ * Derive a writable, data-independent volume from an existing
+ * snapshot. The resulting volume is auto-activated (mirroring
+ * cubecow_create_volume's "volume-device lifetime" contract) and its
+ * device path is written to out_device_path (owned C string, caller
+ * frees with cubecow_free_string). The source must be an existing
+ * snapshot; passing a writable volume name yields
+ * COW_ERR_INVALID_ARG.
+ */
+int32_t cubecow_create_volume_from_snapshot(
+    CubecowEngineHandle engine,
+    const char* source_snapshot,
+    const char* volume_name,
     char** out_device_path);
 
 /* ------------------------------------------------------------------ */

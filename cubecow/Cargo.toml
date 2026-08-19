@@ -3,7 +3,6 @@ name = "cubecow"
 version = "0.1.0"
 edition = "2021"
 description = "An xfs-reflink based Copy-On-Write storage engine providing thin-provisioned volume management and O(1) snapshots/clones via FICLONE"
-license = "MIT"
 
 [lib]
 name = "cubecow"
@@ -72,3 +71,15 @@ strip = "symbols"
 [[bench]]
 name = "reflink_ops"
 harness = false
+
+# -----------------------------------------------------------------------------
+# Examples
+# -----------------------------------------------------------------------------
+# The `examples/s3_rpc_smoke/` directory contains a **standalone Cargo
+# crate** (with its own `Cargo.toml` + `[workspace]` isolation) that
+# exercises every RPC method of the s3lvol / RCOW JSON-RPC server. It
+# is intentionally NOT declared as a `[[example]]` of the cubecow crate
+# so that it can be cross-compiled (e.g. to `x86_64-unknown-linux-musl`)
+# and shipped as a single static binary independently of the main lib.
+#
+# Build & run instructions live in `examples/s3_rpc_smoke/README.md`.

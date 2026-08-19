@@ -12,14 +12,14 @@ package cubecow
 #include "cubecow.h"
 #include <stdlib.h>
 
-static inline int32_t cubecow_create_snapshot_go(
+static inline int32_t cubecow_create_snapshot_from_volume_go(
     CubecowEngineHandle engine,
     const char* source_name,
     const char* snapshot_name,
     int activate,
     char** out_device_path
 ) {
-    return cubecow_create_snapshot(engine, source_name, snapshot_name, activate != 0, out_device_path);
+    return cubecow_create_snapshot_from_volume(engine, source_name, snapshot_name, activate != 0, out_device_path);
 }
 */
 import "C"
@@ -270,7 +270,7 @@ func (e *Engine) ListVolumes(pageSize uint64, pageToken string) (*ListVolumesRes
 	return result, nil
 }
 
-func (e *Engine) CreateSnapshot(sourceName, snapshotName string, activate bool) (string, error) {
+func (e *Engine) CreateSnapshotFromVolume(sourceName, snapshotName string, activate bool) (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -286,7 +286,30 @@ func (e *Engine) CreateSnapshot(sourceName, snapshotName string, activate bool) 
 	defer C.free(unsafe.Pointer(cSnapshotName))
 
 	var cDevicePath *C.char
-	rc := C.cubecow_create_snapshot_go(C.CubecowEngineHandle(ptr), cSourceName, cSnapshotName, cBoolInt(activate), &cDevicePath)
+	rc := C.cubecow_create_snapshot_from_volume_go(C.CubecowEngineHandle(ptr), cSourceName, cSnapshotName, cBoolInt(activate), &cDevicePath)
+	if rc != 0 {
+		return "", makeError(rc)
+	}
+	return takeCString(cDevicePath), nil
+}
+
+func (e *Engine) CreateVolumeFromSnapshot(sourceSnapshot, volumeName string) (string, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	ptr, err := e.openHandle()
+	if err != nil {
+		return "", err
+	}
+	defer e.mu.RUnlock()
+
+	cSource := C.CString(sourceSnapshot)
+	defer C.free(unsafe.Pointer(cSource))
+	cVolume := C.CString(volumeName)
+	defer C.free(unsafe.Pointer(cVolume))
+
+	var cDevicePath *C.char
+	rc := C.cubecow_create_volume_from_snapshot(C.CubecowEngineHandle(ptr), cSource, cVolume, &cDevicePath)
 	if rc != 0 {
 		return "", makeError(rc)
 	}

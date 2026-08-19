@@ -107,8 +107,10 @@ func DefaultTemplateObjectRefs(templateID string) []CowObjectRef {
 	return []CowObjectRef{
 		{Name: cowTemplateRootfsName(templateID), Kind: cowKindSnapshot, Role: "rootfs"},
 		{Name: cowTemplateMemoryName(templateID), Kind: cowKindVolume, Role: "memory"},
+		{Name: cowTemplateMemoryName(templateID) + "-snap", Kind: cowKindSnapshot, Role: "memory"},
 		{Name: cowTemplateBuildRootfsName(templateID), Kind: cowKindVolume, Role: "build_rootfs"},
-		{Name: S3MetadataVolumeName(templateID), Kind: cowKindSnapshot, Role: "metadata"},
+		{Name: S3MetadataVolumeName(templateID), Kind: cowKindVolume, Role: "metadata"},
+		{Name: S3MetadataSnapshotName(templateID), Kind: cowKindSnapshot, Role: "metadata"},
 	}
 }
 

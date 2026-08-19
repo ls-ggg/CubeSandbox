@@ -1257,17 +1257,22 @@ func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.Creat
 	if err != nil {
 		return nil, err
 	}
-	if uuids := remoteUUIDsFromCreateContext(opts); !uuids.Empty() && backend == cow.BackendS3 {
+	uuids := remoteUUIDsFromCreateContext(opts)
+	fetchedRemote := !uuids.Empty() && backend == cow.BackendS3
+	if fetchedRemote {
+		// import_lvol yields RW volumes ready for Resume／create; use in place.
 		if err := FetchSnapshot(ctx, backend, templateID, uuids, true); err != nil {
 			return nil, err
 		}
-	}
-	if opts != nil && opts.IsPauseResume() {
 		if err := activateStoreObjects(ctx, store, backend, templateID); err != nil {
 			return nil, err
 		}
 		return attachExistingSnapshotRootfs(ctx, store, backend, templateID)
 	}
+	// Cold start and same-node Pause Resume: always clone the package rootfs
+	// snapshot into a sandbox-private RW volume (sb-<id>-rootfs-genN). Do not
+	// attach the package snap as the live disk — S3 snaps are RO and Commit
+	// requires a volume source (volume follows sandbox lifecycle).
 	return store.CreateSandboxRootfsFromTemplate(ctx, sandboxID, templateID, 0, desiredSizeBytes)
 }
 
@@ -1300,9 +1305,21 @@ func attachExistingSnapshotRootfs(ctx context.Context, store cow.Store, backend,
 	}
 	dev, err := store.ResolveDevPath(ctx, rootfs.Name, rootfs.Kind)
 	if err != nil {
-		return nil, fmt.Errorf("activate snapshot %s rootfs %s: %w", snapshotID, rootfs.Name, err)
+		// After cross-node import_lvol the object is a volume even if the
+		// catalog still records kind=snapshot from the export side.
+		if rootfs.Kind != cowKindVolume {
+			dev, err = store.ResolveDevPath(ctx, rootfs.Name, cowKindVolume)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("activate snapshot %s rootfs %s: %w", snapshotID, rootfs.Name, err)
+		}
+		return newCowVolume(rootfs.Name, cowKindVolume, 0, dev), nil
 	}
-	return newCowVolume(rootfs.Name, rootfs.Kind, 0, dev), nil
+	kind := rootfs.Kind
+	if kind == "" {
+		kind = cowKindVolume
+	}
+	return newCowVolume(rootfs.Name, kind, 0, dev), nil
 }
 
 func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
@@ -1474,6 +1491,21 @@ func (l *local) destroy(ctx context.Context, info *StorageInfo, opts *workflow.D
 
 	if err := l.destroyDefaultMediumVolumes(ctx, info, opts); err != nil {
 		errs = errors.Join(errs, err)
+	}
+
+	// Private S3 metadata volume (s3-meta-<sandboxID>) is not always listed in
+	// info.Volumes; release by sandbox id. Also drop the sandbox-owned package
+	// dir used as the cold-start metadata mount point.
+	if l.useCowStorage() && info != nil && strings.TrimSpace(info.SandboxID) != "" {
+		backend := destroyStorageBackend(info, opts)
+		if err := ReleaseS3MetadataVolume(ctx, backend, info.SandboxID); err != nil {
+			log.G(ctx).Warnf("destroy sandbox %s: release s3 metadata: %v", info.SandboxID, err)
+		}
+		if home := SnapshotHome(backend, SnapshotKindNormal, info.SandboxID); home != "" {
+			if err := os.RemoveAll(home); err != nil && !os.IsNotExist(err) {
+				log.G(ctx).Warnf("destroy sandbox %s: remove package dir %s: %v", info.SandboxID, home, err)
+			}
+		}
 	}
 
 	// plugin_volume: unmount all volumes that were provisioned via VolumePlugin.

@@ -216,20 +216,7 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 	// binding routes the next commit through the fallback-to-full branch
 	// in prepareCommitMemoryArtifact, which is self-contained and safe.
 	setRuntimeSnapshotBindingLabels(cb, rsp.TemplateID, time.Now().UTC())
-	if err := writeMemoryDevFile(layout.MemoryWork, memoryObject.DevPath); err != nil {
-		cleanupArtifacts()
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to write memory.dev: %v", err)
-		return rsp, nil
-	}
-	if layout.DiskWork != layout.MetaWork {
-		if err := writeDiskDevFile(layout.DiskWork, rootfsObject.DevPath); err != nil {
-			cleanupArtifacts()
-			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to write disk.dev: %v", err)
-			return rsp, nil
-		}
-	}
+	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
 	if err := deactivateCowSnapshotObjectsOn(ctx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		cleanupArtifacts()
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
@@ -301,6 +288,10 @@ func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxR
 		// path keeps the legacy fallback. Log loudly so operators notice
 		// drift between master and cubelet local view.
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", rsp.TemplateID, err)
+	}
+	// S3: seal memory／metadata work volumes to RO snapshots, then Upload.
+	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, rsp.TemplateID); err != nil {
+		stepLog.Warnf("failed to seal s3 package snapshots for %s: %v", rsp.TemplateID, err)
 	}
 	if raw := uploadRemoteUUIDsIfS3(ctx, backend, rsp.TemplateID); raw != "" {
 		rsp.RemoteUuids = raw

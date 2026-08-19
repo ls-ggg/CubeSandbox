@@ -15,33 +15,35 @@ import (
 )
 
 type fakeCowEngine struct {
-	createVolumePath          string
-	createVolumeErr           error
-	createVolumes             []string
-	createVolumeSizes         map[string]uint64
-	createSnapshots           [][2]string
-	createSnapshotActivations []bool
-	createSnapshotPath        string
-	createSnapshotErr         error
-	activatePaths             map[string]string
-	activatedVolumes          []string
-	deactivatedVolumes        []string
-	activateErr               error
-	deactivateErr             error
-	volumeInfos               map[string]*cubecow.Volume
-	listSnapshots             map[string][]cubecow.Snapshot
-	listSnapshotsErr          error
-	deletedVolumes            []string
-	deletedSnapshots          []string
-	deleteVolumeErr           error
-	deleteSnapshotErr         error
-	resizeErr                 error
-	resizedVolumes            map[string]uint64
-	metrics                   map[string]uint64
-	metricsErr                error
-	exportSnapshots           []string
-	exportUUIDPrefix          string
-	exportErr                 error
+	createVolumePath            string
+	createVolumeErr             error
+	createVolumes               []string
+	createVolumeSizes           map[string]uint64
+	createSnapshots             [][2]string
+	createSnapshotActivations   []bool
+	createSnapshotPath          string
+	createSnapshotErr           error
+	createVolumeFromSnapshots   [][2]string
+	createVolumeFromSnapshotErr error
+	activatePaths               map[string]string
+	activatedVolumes            []string
+	deactivatedVolumes          []string
+	activateErr                 error
+	deactivateErr               error
+	volumeInfos                 map[string]*cubecow.Volume
+	listSnapshots               map[string][]cubecow.Snapshot
+	listSnapshotsErr            error
+	deletedVolumes              []string
+	deletedSnapshots            []string
+	deleteVolumeErr             error
+	deleteSnapshotErr           error
+	resizeErr                   error
+	resizedVolumes              map[string]uint64
+	metrics                     map[string]uint64
+	metricsErr                  error
+	exportSnapshots             []string
+	exportUUIDPrefix            string
+	exportErr                   error
 }
 
 func (f *fakeCowEngine) CreateVolume(name string, sizeBytes uint64) (string, error) {
@@ -61,7 +63,7 @@ func (f *fakeCowEngine) CreateVolume(name string, sizeBytes uint64) (string, err
 	return f.createVolumePath, f.createVolumeErr
 }
 
-func (f *fakeCowEngine) CreateSnapshot(sourceName, snapshotName string, activate bool) (string, error) {
+func (f *fakeCowEngine) CreateSnapshotFromVolume(sourceName, snapshotName string, activate bool) (string, error) {
 	f.createSnapshots = append(f.createSnapshots, [2]string{sourceName, snapshotName})
 	f.createSnapshotActivations = append(f.createSnapshotActivations, activate)
 	if f.createSnapshotErr != nil {
@@ -87,6 +89,30 @@ func (f *fakeCowEngine) CreateSnapshot(sourceName, snapshotName string, activate
 		OriginVolume: sourceName,
 		DevicePath:   path,
 	})
+	return path, nil
+}
+
+func (f *fakeCowEngine) CreateVolumeFromSnapshot(sourceSnapshot, volumeName string) (string, error) {
+	f.createVolumes = append(f.createVolumes, volumeName)
+	if f.createVolumeFromSnapshots == nil {
+		f.createVolumeFromSnapshots = [][2]string{}
+	}
+	f.createVolumeFromSnapshots = append(f.createVolumeFromSnapshots, [2]string{sourceSnapshot, volumeName})
+	if f.createVolumeFromSnapshotErr != nil {
+		return "", f.createVolumeFromSnapshotErr
+	}
+	path := f.createVolumePath
+	if path == "" {
+		path = "/dev/mapper/" + volumeName
+	}
+	if f.volumeInfos == nil {
+		f.volumeInfos = map[string]*cubecow.Volume{}
+	}
+	size := uint64(8 << 20)
+	if src := f.volumeInfos[sourceSnapshot]; src != nil && src.SizeBytes > 0 {
+		size = src.SizeBytes
+	}
+	f.volumeInfos[volumeName] = &cubecow.Volume{DevicePath: path, SizeBytes: size}
 	return path, nil
 }
 

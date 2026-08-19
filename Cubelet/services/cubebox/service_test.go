@@ -466,16 +466,6 @@ func newRunningCommitSandboxForTest(volumes []*cubeboxv1.Volume, mounts []*cubeb
 	return cb
 }
 
-func TestWriteMemoryDevFile(t *testing.T) {
-	dir := t.TempDir()
-
-	require.NoError(t, writeMemoryDevFile(dir, "/dev/mapper/tpl-snapshot-memory"))
-
-	got, err := os.ReadFile(filepath.Join(dir, "memory.dev"))
-	require.NoError(t, err)
-	assert.Equal(t, "/dev/mapper/tpl-snapshot-memory\n", string(got))
-}
-
 func TestAppSnapshotRequiresCowBeforeCreate(t *testing.T) {
 	rsp, err := (&service{}).AppSnapshot(context.Background(), &cubeboxv1.AppSnapshotRequest{
 		CreateRequest: &cubeboxv1.RunCubeSandboxRequest{

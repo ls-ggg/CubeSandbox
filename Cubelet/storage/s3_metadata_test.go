@@ -120,7 +120,8 @@ func TestPrepareS3MetadataMountSnapshotsFromBase(t *testing.T) {
 
 	mount := t.TempDir()
 	require.NoError(t, PrepareS3MetadataMount(context.Background(), cow.BackendS3, "snap-meta-1", mount))
-	require.Equal(t, [][2]string{{S3MetadataBaseVolumeName, S3MetadataVolumeName("snap-meta-1")}}, engine.createSnapshots)
+	require.Equal(t, [][2]string{{S3MetadataBaseVolumeName, S3MetadataBaseSnapshotName}}, engine.createSnapshots)
+	require.Equal(t, [][2]string{{S3MetadataBaseSnapshotName, S3MetadataVolumeName("snap-meta-1")}}, engine.createVolumeFromSnapshots)
 	require.True(t, s3MetadataIsMounted(mount))
 
 	require.NoError(t, UnmountS3Metadata(mount))
@@ -130,9 +131,30 @@ func TestPrepareS3MetadataMountSnapshotsFromBase(t *testing.T) {
 	require.False(t, s3MetadataIsMounted(mount))
 
 	require.NoError(t, ReleaseS3MetadataVolume(context.Background(), cow.BackendS3, "snap-meta-1"))
-	require.Equal(t, []string{S3MetadataVolumeName("snap-meta-1")}, engine.deletedSnapshots)
+	require.Equal(t, []string{S3MetadataVolumeName("snap-meta-1")}, engine.deletedVolumes)
 	require.NotContains(t, engine.deletedVolumes, S3MetadataBaseVolumeName)
+	require.NotContains(t, engine.deletedSnapshots, S3MetadataBaseSnapshotName)
 	require.False(t, s3MetadataIsMounted(final))
+}
+
+func TestMountS3MetadataAtClonesSealedSnap(t *testing.T) {
+	stubS3MetadataMounts(t)
+	id := "pause-1"
+	snap := S3MetadataSnapshotName(id)
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			S3MetadataBaseVolumeName:   {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + S3MetadataBaseVolumeName},
+			S3MetadataBaseSnapshotName: {SizeBytes: 8 << 20},
+			snap:                       {SizeBytes: 8 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	mount := t.TempDir()
+	require.NoError(t, MountS3MetadataAt(context.Background(), cow.BackendS3, id, mount))
+	require.Equal(t, [][2]string{{snap, S3MetadataVolumeName(id)}}, engine.createVolumeFromSnapshots)
+	require.True(t, s3MetadataIsMounted(mount))
+	require.NotContains(t, engine.activatedVolumes, snap)
 }
 
 func TestPrepareS3MetadataMountNoOpOnXFS(t *testing.T) {
@@ -147,18 +169,19 @@ func TestPrepareS3MetadataMountNoOpOnXFS(t *testing.T) {
 
 func TestCloneS3MetadataFromParentUsesParentVolume(t *testing.T) {
 	stubS3MetadataMounts(t)
-	parent := S3MetadataVolumeName("tpl-1")
+	parentSnap := S3MetadataSnapshotName("tpl-1")
 	engine := &fakeCowEngine{
 		volumeInfos: map[string]*cubecow.Volume{
-			S3MetadataBaseVolumeName: {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + S3MetadataBaseVolumeName},
-			parent:                   {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + parent},
+			S3MetadataBaseVolumeName:   {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + S3MetadataBaseVolumeName},
+			S3MetadataBaseSnapshotName: {SizeBytes: 8 << 20, DevicePath: ""},
+			parentSnap:                 {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + parentSnap},
 		},
 	}
 	useTestCowStorage(t, engine)
 
 	mount := t.TempDir()
 	require.NoError(t, CloneS3MetadataFromParent(context.Background(), cow.BackendS3, "tpl-1", "sb-1", mount))
-	require.Equal(t, [][2]string{{parent, S3MetadataVolumeName("sb-1")}}, engine.createSnapshots)
+	require.Equal(t, [][2]string{{parentSnap, S3MetadataVolumeName("sb-1")}}, engine.createVolumeFromSnapshots)
 	require.True(t, s3MetadataIsMounted(mount))
 }
 
@@ -173,7 +196,8 @@ func TestCloneS3MetadataFromParentFallsBackToBase(t *testing.T) {
 
 	mount := t.TempDir()
 	require.NoError(t, CloneS3MetadataFromParent(context.Background(), cow.BackendS3, "tpl-missing", "sb-2", mount))
-	require.Equal(t, [][2]string{{S3MetadataBaseVolumeName, S3MetadataVolumeName("sb-2")}}, engine.createSnapshots)
+	require.Contains(t, engine.createSnapshots, [2]string{S3MetadataBaseVolumeName, S3MetadataBaseSnapshotName})
+	require.Equal(t, [][2]string{{S3MetadataBaseSnapshotName, S3MetadataVolumeName("sb-2")}}, engine.createVolumeFromSnapshots)
 }
 
 func TestUploadStatusUsesExportStatus(t *testing.T) {
@@ -230,6 +254,17 @@ func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 		},
 	}
 	useTestCowStorage(t, engine)
+	require.NoError(t, WriteSnapshotCatalogFor(cow.BackendS3, &SnapshotCatalogEntry{
+		SnapshotID:   "snap-1",
+		RootfsVol:    "tpl-snap-1-rootfs",
+		RootfsKind:   cowKindSnapshot,
+		MemoryVol:    "tpl-snap-1-memory",
+		MemoryKind:   cowKindVolume,
+		MetadataVol:  S3MetadataVolumeName("snap-1"),
+		MetadataKind: cowKindVolume,
+		Backend:      cow.BackendS3,
+	}))
+	require.NoError(t, FinalizeS3PackageSnapshots(context.Background(), cow.BackendS3, "snap-1"))
 
 	uuids, err := UploadSnapshot(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
@@ -238,6 +273,8 @@ func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 	require.NotEmpty(t, uuids.Metadata)
 	require.NotEqual(t, uuids.Rootfs, uuids.Metadata)
 	require.NotContains(t, engine.exportSnapshots, S3MetadataBaseVolumeName)
+	require.Contains(t, engine.exportSnapshots, S3MetadataSnapshotName("snap-1"))
+	require.NotContains(t, engine.exportSnapshots, S3MetadataVolumeName("snap-1"))
 
 	_, err = (&S3Cow{engine: engine}).uploadOne(S3MetadataBaseVolumeName)
 	require.Error(t, err)
@@ -246,8 +283,11 @@ func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 
 func TestIsS3MetadataBaseName(t *testing.T) {
 	require.True(t, IsS3MetadataBaseName(S3MetadataBaseVolumeName))
+	require.True(t, IsS3MetadataBaseName(S3MetadataBaseSnapshotName))
 	require.False(t, IsS3MetadataBaseName(S3MetadataVolumeName("snap-1")))
 	require.Equal(t, "s3-meta-snap-1", S3MetadataVolumeName("snap-1"))
 	require.Equal(t, "", S3MetadataCatalogVol(cow.BackendXFS, "snap-1"))
 	require.Equal(t, "s3-meta-snap-1", S3MetadataCatalogVol(cow.BackendS3, "snap-1"))
+	require.Equal(t, cowKindVolume, S3MetadataCatalogKind(cow.BackendS3))
+	require.Equal(t, "", S3MetadataCatalogKind(cow.BackendXFS))
 }

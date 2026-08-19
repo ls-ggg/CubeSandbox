@@ -13,10 +13,11 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
-// Fetch implements [cow.Fetcher]. Cross-node use calls cubecow_import_lvol
-// first. activate=true then cubecow_activate_volume (fetch may already
-// open the device). Same-node: objects already exist → skip import,
-// only activate when asked (no remote uuid required).
+// Fetch implements [cow.Fetcher]. Cross-node recovery calls
+// cubecow_import_lvol(name, export_uuid): the result is a RW volume
+// derived from the remote snapshot, ready for Resume／sandbox create.
+// activate=true opens the block device. Same-node: object already
+// present → skip import.
 func (m *S3Cow) Fetch(ctx context.Context, snapshotID string, uuids *cow.RemoteUUIDs, activate bool) error {
 	id := strings.TrimSpace(snapshotID)
 	if id == "" {
@@ -56,30 +57,41 @@ func appendMetadataFetchRef(refs []CowObjectRef, snapshotID string, uuids *cow.R
 			return refs
 		}
 	}
-	name := S3MetadataVolumeName(snapshotID)
+	// Exported metadata is the sealed snap name; import_lvol recreates a
+	// RW volume under that same name for local Resume／mount.
+	name := S3MetadataSnapshotName(snapshotID)
 	if name == "" || IsS3MetadataBaseName(name) {
 		return refs
 	}
-	return append(refs, CowObjectRef{Name: name, Kind: cowKindSnapshot, Role: "metadata"})
+	return append(refs, CowObjectRef{Name: name, Kind: cowKindVolume, Role: "metadata"})
 }
 
 func (m *S3Cow) fetchOne(ctx context.Context, name, remoteUUID string) error {
+	_ = ctx
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("object name is required")
+	}
 	if info, err := m.GetVolumeInfo(ctx, name); err == nil && info != nil {
 		return nil
 	}
-	if imp, ok := m.engine.(cowVolumeImporter); ok {
-		_, err := imp.ImportLvol(name, remoteUUID)
-		if err == nil || isCowSemantic(err, cubecow.SemAlreadyExists) {
+	imp, ok := m.engine.(cowVolumeImporter)
+	if !ok || imp == nil {
+		if info, err := m.GetVolumeInfo(ctx, name); err == nil && info != nil {
 			return nil
 		}
+		return fmt.Errorf("%w: %s (remote_uuid=%s)", ErrCowObjectMissing, name, remoteUUID)
+	}
+	if _, err := imp.ImportLvol(name, remoteUUID); err != nil && !isCowSemantic(err, cubecow.SemAlreadyExists) {
 		if !isCowSemantic(err, cubecow.SemPreconditionFailed) {
 			return err
 		}
+		if info, err := m.GetVolumeInfo(ctx, name); err == nil && info != nil {
+			return nil
+		}
+		return fmt.Errorf("%w: %s (remote_uuid=%s)", ErrCowObjectMissing, name, remoteUUID)
 	}
-	if info, err := m.GetVolumeInfo(ctx, name); err == nil && info != nil {
-		return nil
-	}
-	return fmt.Errorf("%w: %s (remote_uuid=%s)", ErrCowObjectMissing, name, remoteUUID)
+	return nil
 }
 
 func uuidForRole(uuids *cow.RemoteUUIDs, role string) string {
@@ -97,5 +109,3 @@ func uuidForRole(uuids *cow.RemoteUUIDs, role string) string {
 		return ""
 	}
 }
-
-var _ cow.Fetcher = (*S3Cow)(nil)

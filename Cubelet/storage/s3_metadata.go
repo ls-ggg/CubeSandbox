@@ -26,20 +26,23 @@ import (
 
 const (
 	// S3MetadataBaseVolumeName is the per-node, local-only cubecow volume
-	// that Cubelet formats as ext4 during S3 init. Every later S3 metadata
-	// disk (template / pause / snapshot / sandbox restore package) is a
-	// snapshot of this volume (or of a parent package metadata disk).
+	// that Cubelet formats as ext4 during S3 init.
 	S3MetadataBaseVolumeName = "cubelet-s3-metadata-base"
-	s3MetadataBaseSizeBytes  = 8 << 20
-	s3MetadataVolumePrefix   = "s3-meta-"
-	s3MetadataBucket         = "s3-metadata/v1"
-	s3MetadataStateKey       = "state"
+	// S3MetadataBaseSnapshotName is the RO snapshot of the base volume.
+	// Package metadata disks are writable volumes cloned from this snap
+	// (or from a parent package metadata volume via snap→clone).
+	S3MetadataBaseSnapshotName = "cubelet-s3-metadata-base-snap"
+	s3MetadataBaseSizeBytes    = 8 << 20
+	s3MetadataVolumePrefix     = "s3-meta-"
+	s3MetadataBucket           = "s3-metadata/v1"
+	s3MetadataStateKey         = "state"
 )
 
 type s3MetadataBaseRecord struct {
-	Name      string `json:"name"`
-	SizeBytes uint64 `json:"size_bytes"`
-	Formatted bool   `json:"formatted"`
+	Name         string `json:"name"`
+	SnapshotName string `json:"snapshot_name,omitempty"`
+	SizeBytes    uint64 `json:"size_bytes"`
+	Formatted    bool   `json:"formatted"`
 }
 
 type s3MetadataDerivedRecord struct {
@@ -69,8 +72,8 @@ var (
 	testS3MetadataKV s3MetadataKV
 )
 
-// S3MetadataVolumeName is the cubecow snapshot cloned from the node-local
-// metadata base for one template / pause / snapshot package.
+// S3MetadataVolumeName is the writable cubecow volume for one template /
+// pause / snapshot package metadata disk (cloned from the base snapshot).
 func S3MetadataVolumeName(snapshotID string) string {
 	id := strings.TrimSpace(snapshotID)
 	if id == "" {
@@ -79,13 +82,26 @@ func S3MetadataVolumeName(snapshotID string) string {
 	return s3MetadataVolumePrefix + id
 }
 
-// IsS3MetadataBaseName reports the node-local metadata base. That volume
-// must never be exported or fetched; it stays on this Cubelet.
-func IsS3MetadataBaseName(name string) bool {
-	return strings.TrimSpace(name) == S3MetadataBaseVolumeName
+// S3MetadataSnapshotName is the RO sealed snapshot of the package metadata
+// volume. Only this name is exported／fetched across nodes.
+func S3MetadataSnapshotName(snapshotID string) string {
+	name := S3MetadataVolumeName(snapshotID)
+	if name == "" {
+		return ""
+	}
+	return name + "-snap"
 }
 
-// S3MetadataCatalogVol is the catalog metadata_vol field for an S3 package.
+// IsS3MetadataBaseName reports the node-local metadata base volume or its
+// RO snapshot. Neither must be exported or fetched; they stay on this Cubelet.
+func IsS3MetadataBaseName(name string) bool {
+	n := strings.TrimSpace(name)
+	return n == S3MetadataBaseVolumeName || n == S3MetadataBaseSnapshotName
+}
+
+// S3MetadataCatalogVol is the catalog metadata_vol for an S3 package.
+// Before finalize this is the RW work volume; FinalizeS3PackageSnapshots
+// rewrites it to S3MetadataSnapshotName for export.
 func S3MetadataCatalogVol(backend, snapshotID string) string {
 	if !isS3CatalogBackend(backend) {
 		return ""
@@ -93,12 +109,13 @@ func S3MetadataCatalogVol(backend, snapshotID string) string {
 	return S3MetadataVolumeName(snapshotID)
 }
 
-// S3MetadataCatalogKind is snapshot for S3 metadata disks, empty on XFS.
+// S3MetadataCatalogKind is volume while metadata is still being written;
+// FinalizeS3PackageSnapshots switches the catalog entry to snapshot.
 func S3MetadataCatalogKind(backend string) string {
 	if !isS3CatalogBackend(backend) {
 		return ""
 	}
-	return cowKindSnapshot
+	return cowKindVolume
 }
 
 func parseS3MetadataSnapshotID(volName string) string {
@@ -182,6 +199,9 @@ func EnsureS3MetadataBase(ctx context.Context) error {
 			state.Base.SizeBytes = info.SizeBytes
 		}
 		state.Base.Formatted = true
+		if err := ensureS3MetadataBaseSnapshotLocked(ctx, store, &state.Base); err != nil {
+			return err
+		}
 		if err := saveS3MetadataState(state); err != nil {
 			return err
 		}
@@ -204,16 +224,48 @@ func EnsureS3MetadataBase(ctx context.Context) error {
 		SizeBytes: s3MetadataBaseSizeBytes,
 		Formatted: true,
 	}
+	if err := ensureS3MetadataBaseSnapshotLocked(ctx, store, &state.Base); err != nil {
+		return err
+	}
 	if err := saveS3MetadataState(state); err != nil {
 		return err
 	}
-	CubeLog.Infof("s3 metadata base %s ready size=%d formatted=%v created=%v", name, s3MetadataBaseSizeBytes, true, created)
+	CubeLog.Infof("s3 metadata base %s ready size=%d formatted=%v created=%v snap=%s", name, s3MetadataBaseSizeBytes, true, created, state.Base.SnapshotName)
 	return nil
 }
 
-// PrepareS3MetadataMount clones the node-local base into a package-specific
-// snapshot and mounts it at mountPath (the designed metadata/ directory).
-// XFS is a no-op.
+func ensureS3MetadataBaseSnapshotLocked(ctx context.Context, store *S3Cow, base *s3MetadataBaseRecord) error {
+	if store == nil || base == nil {
+		return fmt.Errorf("s3 metadata base snapshot requires store and base record")
+	}
+	volName := strings.TrimSpace(base.Name)
+	if volName == "" {
+		volName = S3MetadataBaseVolumeName
+		base.Name = volName
+	}
+	snapName := strings.TrimSpace(base.SnapshotName)
+	if snapName == "" {
+		snapName = S3MetadataBaseSnapshotName
+	}
+	info, infoErr := store.GetVolumeInfo(ctx, snapName)
+	exists, err := cowObjectPresent(info, infoErr)
+	if err != nil {
+		return fmt.Errorf("lookup s3 metadata base snapshot %s: %w", snapName, err)
+	}
+	if !exists {
+		if _, err := store.engine.CreateSnapshotFromVolume(volName, snapName, false); err != nil {
+			if !isCowSemantic(err, cubecow.SemAlreadyExists) {
+				return fmt.Errorf("create s3 metadata base snapshot %s from %s: %w", snapName, volName, err)
+			}
+		}
+	}
+	base.SnapshotName = snapName
+	return nil
+}
+
+// PrepareS3MetadataMount ensures the node-local base volume+snapshot exist,
+// clones a writable package metadata volume from the base snapshot, and
+// mounts it at mountPath (the designed metadata/ directory). XFS is a no-op.
 func PrepareS3MetadataMount(ctx context.Context, backend, snapshotID, mountPath string) error {
 	if !isS3CatalogBackend(backend) {
 		return nil
@@ -278,14 +330,19 @@ func CloneS3MetadataFromParent(ctx context.Context, backend, parentID, childID, 
 
 	source := ""
 	if parentID != "" && parentID != childID {
-		parentVol := S3MetadataVolumeName(parentID)
-		info, infoErr := store.GetVolumeInfo(ctx, parentVol)
-		exists, err := cowObjectPresent(info, infoErr)
-		if err != nil {
-			return fmt.Errorf("lookup parent s3 metadata %s: %w", parentVol, err)
-		}
-		if exists {
-			source = parentVol
+		for _, candidate := range []string{S3MetadataSnapshotName(parentID), S3MetadataVolumeName(parentID)} {
+			if candidate == "" {
+				continue
+			}
+			info, infoErr := store.GetVolumeInfo(ctx, candidate)
+			exists, err := cowObjectPresent(info, infoErr)
+			if err != nil {
+				return fmt.Errorf("lookup parent s3 metadata %s: %w", candidate, err)
+			}
+			if exists {
+				source = candidate
+				break
+			}
 		}
 	}
 	vol, err := store.deriveMetadataSnapshotLocked(ctx, childID, source)
@@ -298,7 +355,12 @@ func CloneS3MetadataFromParent(ctx context.Context, backend, parentID, childID, 
 	return persistDerivedLocked(childID, vol.VolumeName, mountPath)
 }
 
-// MountS3MetadataAt mounts an existing derived metadata snapshot at mountPath.
+// MountS3MetadataAt mounts the package metadata disk at mountPath.
+// IO always goes through a RW volume (s3-meta-<id>). If only the sealed
+// snap remains, it is cloned to that volume first — never activate／mount
+// the package snap for metadata IO. After Fetch, import_lvol may already
+// be a volume under the snap name; that name is used only when cloning
+// into s3-meta-<id> is not possible.
 func MountS3MetadataAt(ctx context.Context, backend, snapshotID, mountPath string) error {
 	if !isS3CatalogBackend(backend) {
 		return nil
@@ -319,18 +381,16 @@ func MountS3MetadataAt(ctx context.Context, backend, snapshotID, mountPath strin
 	s3MetadataMu.Lock()
 	defer s3MetadataMu.Unlock()
 
-	name := S3MetadataVolumeName(id)
-	info, infoErr := store.GetVolumeInfo(ctx, name)
-	exists, err := cowObjectPresent(info, infoErr)
+	name, err := store.ensureS3MetadataRWVolumeLocked(ctx, id)
 	if err != nil {
-		return fmt.Errorf("lookup s3 metadata snapshot %s: %w", name, err)
+		return err
 	}
-	if !exists {
+	if name == "" {
 		return nil
 	}
-	devPath, err := store.ResolveDevPath(ctx, name, cowKindSnapshot)
+	devPath, err := store.ResolveDevPath(ctx, name, cowKindVolume)
 	if err != nil {
-		return fmt.Errorf("resolve s3 metadata snapshot %s: %w", name, err)
+		return fmt.Errorf("resolve s3 metadata volume %s: %w", name, err)
 	}
 	if err := mountS3MetadataLocked(id, devPath, mountPath); err != nil {
 		return err
@@ -346,22 +406,6 @@ func MountS3MetadataForSnapshot(ctx context.Context, backend, snapshotID string)
 	}
 	id := strings.TrimSpace(snapshotID)
 	if id == "" {
-		return nil
-	}
-	store, err := requireS3Cow()
-	if err != nil {
-		return err
-	}
-	if store == nil {
-		return nil
-	}
-	name := S3MetadataVolumeName(id)
-	info, infoErr := store.GetVolumeInfo(ctx, name)
-	exists, err := cowObjectPresent(info, infoErr)
-	if err != nil {
-		return err
-	}
-	if !exists {
 		return nil
 	}
 	mountPath := s3MetadataMountPathFor(id)
@@ -460,8 +504,13 @@ func ReleaseS3MetadataVolume(ctx context.Context, backend, snapshotID string) er
 		return errors.Join(umountErr, err)
 	}
 	if store != nil {
-		if err := store.DeleteByKind(ctx, name, cowKindSnapshot); err != nil {
-			umountErr = errors.Join(umountErr, fmt.Errorf("delete s3 metadata snapshot %s: %w", name, err))
+		if err := store.DeleteByKind(ctx, name, cowKindVolume); err != nil {
+			umountErr = errors.Join(umountErr, fmt.Errorf("delete s3 metadata volume %s: %w", name, err))
+		}
+		if snap := S3MetadataSnapshotName(id); snap != "" {
+			if err := store.DeleteByKind(ctx, snap, cowKindSnapshot); err != nil {
+				umountErr = errors.Join(umountErr, fmt.Errorf("delete s3 metadata snapshot %s: %w", snap, err))
+			}
 		}
 	}
 	delete(s3MetadataMounts, id)
@@ -508,17 +557,12 @@ func RemountS3MetadataVolumes(ctx context.Context) error {
 			return
 		}
 		seen[id] = struct{}{}
-		name := S3MetadataVolumeName(id)
-		if IsS3MetadataBaseName(name) {
-			return
-		}
-		info, infoErr := store.GetVolumeInfo(ctx, name)
-		exists, err := cowObjectPresent(info, infoErr)
+		name, err := store.ensureS3MetadataRWVolumeLocked(ctx, id)
 		if err != nil {
 			remountErr = errors.Join(remountErr, err)
 			return
 		}
-		if !exists {
+		if name == "" || IsS3MetadataBaseName(name) {
 			return
 		}
 		if strings.TrimSpace(mountPath) == "" {
@@ -527,7 +571,7 @@ func RemountS3MetadataVolumes(ctx context.Context) error {
 		if strings.TrimSpace(mountPath) == "" {
 			return
 		}
-		devPath, err := store.ResolveDevPath(ctx, name, cowKindSnapshot)
+		devPath, err := store.ResolveDevPath(ctx, name, cowKindVolume)
 		if err != nil {
 			CubeLog.Warnf("s3 metadata remount %s: resolve: %v", name, err)
 			return
@@ -592,20 +636,69 @@ func s3MetadataGuessMountPathLocked(snapshotID string) string {
 func (m *S3Cow) deriveMetadataSnapshotLocked(ctx context.Context, snapshotID, sourceName string) (*cowVolume, error) {
 	source := strings.TrimSpace(sourceName)
 	if source == "" {
-		source = S3MetadataBaseVolumeName
-		if state, err := loadS3MetadataState(); err == nil && state != nil && strings.TrimSpace(state.Base.Name) != "" {
-			source = state.Base.Name
+		source = S3MetadataBaseSnapshotName
+		if state, err := loadS3MetadataState(); err == nil && state != nil {
+			if snap := strings.TrimSpace(state.Base.SnapshotName); snap != "" {
+				source = snap
+			}
 		}
 	}
-	snapshotName := S3MetadataVolumeName(snapshotID)
-	if IsS3MetadataBaseName(snapshotName) {
-		return nil, fmt.Errorf("refusing to derive s3 metadata snapshot onto the node-local base")
+	volumeName := S3MetadataVolumeName(snapshotID)
+	if IsS3MetadataBaseName(volumeName) {
+		return nil, fmt.Errorf("refusing to derive s3 metadata onto the node-local base")
 	}
-	devPath, err := m.createOrResolveSnapshotPathFromSource(ctx, source, snapshotName)
+	devPath, err := m.createOrResolveVolumeFromSnapshot(ctx, source, volumeName)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot s3 metadata %s from %s: %w", snapshotName, source, err)
+		return nil, fmt.Errorf("derive s3 metadata volume %s from %s: %w", volumeName, source, err)
 	}
-	return newCowVolume(snapshotName, cowKindSnapshot, 0, devPath), nil
+	return newCowVolume(volumeName, cowKindVolume, 0, devPath), nil
+}
+
+// ensureS3MetadataRWVolumeLocked returns the cubecow name that should be
+// mounted for package metadata IO. Prefer s3-meta-<id> (volume). When only
+// the sealed snap exists, clone it into that volume. Caller must hold
+// s3MetadataMu.
+func (m *S3Cow) ensureS3MetadataRWVolumeLocked(ctx context.Context, packageID string) (string, error) {
+	id := strings.TrimSpace(packageID)
+	if id == "" {
+		return "", fmt.Errorf("s3 metadata package id is required")
+	}
+	volName := S3MetadataVolumeName(id)
+	if IsS3MetadataBaseName(volName) {
+		return "", fmt.Errorf("refusing to use node-local s3 metadata base as package disk")
+	}
+	volInfo, volErr := m.GetVolumeInfo(ctx, volName)
+	volExists, err := cowObjectPresent(volInfo, volErr)
+	if err != nil {
+		return "", fmt.Errorf("lookup s3 metadata volume %s: %w", volName, err)
+	}
+	if volExists {
+		return volName, nil
+	}
+
+	snapName := S3MetadataSnapshotName(id)
+	if snapName == "" || IsS3MetadataBaseName(snapName) {
+		return "", nil
+	}
+	snapInfo, snapErr := m.GetVolumeInfo(ctx, snapName)
+	snapExists, err := cowObjectPresent(snapInfo, snapErr)
+	if err != nil {
+		return "", fmt.Errorf("lookup s3 metadata snap %s: %w", snapName, err)
+	}
+	if !snapExists {
+		return "", nil
+	}
+
+	// Sealed package snap → private RW volume for mount／sandbox IO.
+	if _, err := m.createOrResolveVolumeFromSnapshot(ctx, snapName, volName); err != nil {
+		// Fetch import_lvol may already materialize a RW volume under the
+		// snap name; use it directly when cloning is not possible.
+		if isCowSemantic(err, cubecow.SemInvalidArgument) || isCowSemantic(err, cubecow.SemPreconditionFailed) {
+			return snapName, nil
+		}
+		return "", fmt.Errorf("clone s3 metadata %s from %s: %w", volName, snapName, err)
+	}
+	return volName, nil
 }
 
 func mountS3MetadataLocked(snapshotID, devicePath, mountPath string) error {
@@ -621,8 +714,16 @@ func mountS3MetadataLocked(snapshotID, devicePath, mountPath string) error {
 		return fmt.Errorf("mkdir s3 metadata mount %s: %w", mountPath, err)
 	}
 	if s3MetadataIsMounted(mountPath) {
-		s3MetadataMounts[snapshotID] = filepath.Clean(mountPath)
-		return nil
+		src := s3MetadataMountSource(mountPath)
+		want := filepath.Clean(strings.TrimSpace(devicePath))
+		if src != "" && (src == want || filepath.Base(src) == filepath.Base(want)) {
+			s3MetadataMounts[snapshotID] = filepath.Clean(mountPath)
+			return nil
+		}
+		// Path busy with a different device — never treat as success.
+		if err := unmountS3MetadataPathIfMounted(mountPath); err != nil {
+			return fmt.Errorf("s3 metadata mount %s busy (%s), umount for %s: %w", mountPath, src, want, err)
+		}
 	}
 	if err := mountS3MetadataDevice(devicePath, mountPath); err != nil {
 		return err
@@ -778,6 +879,39 @@ func s3MetadataIsMountedImpl(mountPath string) bool {
 		}
 	}
 	return s3MetadataIsMountedByDev(mountPath)
+}
+
+// s3MetadataMountSource returns the mount source device for mountPath (e.g. /dev/nvme6n1), or "".
+func s3MetadataMountSource(mountPath string) string {
+	mountPath = filepath.Clean(strings.TrimSpace(mountPath))
+	if mountPath == "" || mountPath == "." {
+		return ""
+	}
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) < 5 || filepath.Clean(fields[4]) != mountPath {
+			continue
+		}
+		// mountinfo: ... - fstype source superopts
+		sep := -1
+		for i, f := range fields {
+			if f == "-" {
+				sep = i
+				break
+			}
+		}
+		if sep >= 0 && sep+2 < len(fields) {
+			return filepath.Clean(fields[sep+2])
+		}
+	}
+	return ""
 }
 
 func s3MetadataIsMountedByDev(mountPath string) bool {

@@ -754,7 +754,7 @@ pub extern "C" fn cubecow_list_volumes(
 ///
 /// - `cubecow_activate_volume(name = snapshot_name)` to materialise the
 ///   device later;
-/// - `cubecow_create_snapshot(source_name = snapshot_name, ...)` to
+/// - `cubecow_create_snapshot_from_volume(source_name = snapshot_name, ...)` to
 ///   build a snapshot of this snapshot;
 /// - `cubecow_delete_snapshot(snapshot_name)` to remove it;
 /// - `cubecow_list_snapshots` to enumerate (the entry will appear with
@@ -772,7 +772,7 @@ pub extern "C" fn cubecow_list_volumes(
 /// # Returns
 /// 0 on success, negative error code on failure.
 #[no_mangle]
-pub extern "C" fn cubecow_create_snapshot(
+pub extern "C" fn cubecow_create_snapshot_from_volume(
     engine: *mut std::ffi::c_void,
     source_name: *const c_char,
     snapshot_name: *const c_char,
@@ -787,7 +787,7 @@ pub extern "C" fn cubecow_create_snapshot(
         // SAFETY: `snapshot_name` is a valid C string provided by the caller.
         let snap = unsafe { c_str_to_str(snapshot_name) }?;
 
-        match eng.create_snapshot(src, snap, activate) {
+        match eng.create_snapshot_from_volume(src, snap, activate) {
             Ok(snapshot) => {
                 if !out_device_path.is_null() {
                     // When `activate = false`, `snapshot.device_path` is
@@ -806,7 +806,7 @@ pub extern "C" fn cubecow_create_snapshot(
         Ok(Ok(code)) => code,
         Ok(Err(code)) => code,
         Err(_) => {
-            set_last_error("panic during cubecow_create_snapshot");
+            set_last_error("panic during cubecow_create_snapshot_from_volume");
             COW_ERR_PANIC
         }
     }
@@ -815,7 +815,7 @@ pub extern "C" fn cubecow_create_snapshot(
 /// Activate a volume or snapshot by name (creates its backend device node).
 ///
 /// Must be called before issuing block I/O against a snapshot produced by
-/// `cubecow_create_snapshot`, and can also be used to re-activate a volume /
+/// `cubecow_create_snapshot_from_volume`, and can also be used to re-activate a volume /
 /// snapshot that was previously deactivated via `cubecow_deactivate_volume`.
 /// Idempotent.
 ///
@@ -1100,6 +1100,61 @@ pub extern "C" fn cubecow_import_lvol(
         Ok(Err(code)) => code,
         Err(_) => {
             set_last_error("panic during cubecow_import_lvol");
+            COW_ERR_PANIC
+        }
+    }
+}
+
+/// Derive a writable, data-independent volume from an existing snapshot.
+///
+/// The resulting volume is auto-activated (mirroring
+/// `cubecow_create_volume`'s "volume ⇄ device lifetime" contract) and
+/// its device path is written to `out_device_path` (owned C string,
+/// caller frees with `cubecow_free_string`). The source must be an
+/// existing snapshot — passing a writable volume name yields
+/// `COW_ERR_INVALID_ARG`.
+///
+/// # Parameters
+/// - `engine`: opaque engine pointer
+/// - `source_snapshot`: name of the source snapshot (C string)
+/// - `volume_name`: name for the new writable volume (C string)
+/// - `out_device_path`: receives the device path (caller frees with
+///   `cubecow_free_string`). Optional, can be NULL.
+///
+/// # Returns
+/// 0 on success, negative error code on failure.
+#[no_mangle]
+pub extern "C" fn cubecow_create_volume_from_snapshot(
+    engine: *mut std::ffi::c_void,
+    source_snapshot: *const c_char,
+    volume_name: *const c_char,
+    out_device_path: *mut *mut c_char,
+) -> i32 {
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        // SAFETY: `engine` was created by `cubecow_init` and is valid.
+        let eng = unsafe { engine_ref(engine) }?;
+        // SAFETY: `source_snapshot` is a valid C string provided by the caller.
+        let src = unsafe { c_str_to_str(source_snapshot) }?;
+        // SAFETY: `volume_name` is a valid C string provided by the caller.
+        let vol = unsafe { c_str_to_str(volume_name) }?;
+
+        match eng.create_volume_from_snapshot(src, vol) {
+            Ok(vol) => {
+                if !out_device_path.is_null() {
+                    // SAFETY: `out_device_path` is non-null and writable.
+                    unsafe { *out_device_path = rust_string_to_c(&vol.device_path) };
+                }
+                Ok(COW_OK)
+            }
+            Err(e) => Err(handle_cow_error(&e)),
+        }
+    }));
+
+    match result {
+        Ok(Ok(code)) => code,
+        Ok(Err(code)) => code,
+        Err(_) => {
+            set_last_error("panic during cubecow_create_volume_from_snapshot");
             COW_ERR_PANIC
         }
     }

@@ -105,14 +105,11 @@ func TestPrepareSnapshotWorkLayoutS3UsesKindRoot(t *testing.T) {
 	if layout.MemoryDir != filepath.Join(layout.Home, "memory") {
 		t.Fatalf("s3 memory=%q", layout.MemoryDir)
 	}
-	if layout.DiskDir != filepath.Join(layout.Home, "disk") {
-		t.Fatalf("s3 disk=%q", layout.DiskDir)
-	}
 	if layout.TmpHome != layout.Home || layout.MetaWork != layout.MetaDir {
 		t.Fatalf("s3 must write in place, tmp=%q work=%q home=%q meta=%q", layout.TmpHome, layout.MetaWork, layout.Home, layout.MetaDir)
 	}
-	if layout.MemoryWork != layout.MemoryDir || layout.DiskWork != layout.DiskDir {
-		t.Fatalf("s3 memory/disk work must be final dirs")
+	if layout.MemoryWork != layout.MemoryDir {
+		t.Fatalf("s3 memory work must be final dir")
 	}
 	if layout.usesTmpRename() {
 		t.Fatal("s3 must not use tmp+rename")
@@ -135,8 +132,8 @@ func TestPrepareSnapshotWorkLayoutXFSUsesKindRoot(t *testing.T) {
 	if layout.MetaDir != filepath.Join(layout.Home, "metadata") {
 		t.Fatalf("xfs meta=%q", layout.MetaDir)
 	}
-	if layout.MemoryDir != layout.MetaDir || layout.DiskDir != layout.MetaDir {
-		t.Fatalf("xfs memory/disk should share metadata, memory=%q disk=%q", layout.MemoryDir, layout.DiskDir)
+	if layout.MemoryDir != layout.MetaDir {
+		t.Fatalf("xfs memory should share metadata, memory=%q", layout.MemoryDir)
 	}
 	if layout.TmpHome != layout.Home+".tmp" || !layout.usesTmpRename() {
 		t.Fatalf("xfs must keep tmp+rename, tmp=%q", layout.TmpHome)

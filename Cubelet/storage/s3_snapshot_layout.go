@@ -21,9 +21,10 @@ const (
 	SnapshotKindPause = "pause-snapshots"
 	// SnapshotMetadataDir holds catalog.json, sandbox_spec.json, hypervisor state.
 	SnapshotMetadataDir = "metadata"
-	// SnapshotMemoryDir holds S3 memory files (e.g. memory.dev).
+	// SnapshotMemoryDir holds S3 memory package placeholders (no host .dev files).
 	SnapshotMemoryDir = "memory"
-	// SnapshotDiskDir holds S3 disk files (e.g. disk.dev).
+	// SnapshotDiskDir is the S3 package disk role directory (empty placeholder;
+	// rootfs identity lives in catalog.json, not a host-local .dev file).
 	SnapshotDiskDir = "disk"
 	// SnapshotObjectsDir is the XFS cubecow object pool (files, not metadata).
 	SnapshotObjectsDir = "objects"

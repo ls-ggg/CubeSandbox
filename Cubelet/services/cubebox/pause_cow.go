@@ -306,15 +306,7 @@ func (s *service) updateWithPauseCow(
 	if err := writePauseSandboxSpec(layout.MetaWork, pauseSpec); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to write pause sandbox_spec: %v", err))
 	}
-
-	if err := writeMemoryDevFile(layout.MemoryWork, memoryObject.DevPath); err != nil {
-		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to write memory.dev: %v", err))
-	}
-	if layout.DiskWork != layout.MetaWork {
-		if err := writeDiskDevFile(layout.DiskWork, rootfsObject.DevPath); err != nil {
-			return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to write disk.dev: %v", err))
-		}
-	}
+	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
 	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to deactivate pause snapshot objects: %v", err))
 	}
@@ -345,11 +337,18 @@ func (s *service) updateWithPauseCow(
 		Backend:         backend,
 	}); err != nil {
 		// catalog.json is required for Resume / List / cross-node; do not mark
-		// PAUSED without it (sandbox_spec / memory.dev already fail hard above).
+		// PAUSED without it (sandbox_spec already fails hard above).
 		_ = storage.UnmountS3Metadata(layout.MetaDir)
 		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to persist pause snapshot catalog for %s: %v", snapID, err))
+	}
+	// S3: seal memory／metadata work volumes to RO snapshots before Upload.
+	if err := storage.FinalizeS3PackageSnapshots(workCtx, backend, snapID); err != nil {
+		_ = storage.UnmountS3Metadata(layout.MetaDir)
+		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
+		return failPause(errorcode.ErrorCode_Unknown,
+			fmt.Sprintf("failed to seal s3 pause package snapshots for %s: %v", snapID, err))
 	}
 
 	// Mark PAUSED before keep_tombstone Destroy so the destroy path takes the

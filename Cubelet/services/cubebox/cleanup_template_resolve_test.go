@@ -91,12 +91,15 @@ func TestResolveCleanupRefsFallsBackToDeterministicOnCatalogMiss(t *testing.T) {
 	templateID := "tpl-resolve-miss"
 	refs, snapPath, err := resolveCleanupRefs(context.Background(), "", templateID, nil, "/legacy/fallback")
 	require.NoError(t, err)
-	require.Len(t, refs, 4)
+	require.Len(t, refs, 6)
 	assert.Equal(t, "tpl-"+templateID+"-rootfs", refs[0].Name)
 	assert.Equal(t, "tpl-"+templateID+"-memory", refs[1].Name)
-	assert.Equal(t, "tpl-"+templateID+"-build-rootfs", refs[2].Name)
-	assert.Equal(t, "s3-meta-"+templateID, refs[3].Name)
-	assert.Equal(t, "metadata", refs[3].Role)
+	assert.Equal(t, "tpl-"+templateID+"-memory-snap", refs[2].Name)
+	assert.Equal(t, "tpl-"+templateID+"-build-rootfs", refs[3].Name)
+	assert.Equal(t, "s3-meta-"+templateID, refs[4].Name)
+	assert.Equal(t, "metadata", refs[4].Role)
+	assert.Equal(t, "s3-meta-"+templateID+"-snap", refs[5].Name)
+	assert.Equal(t, "metadata", refs[5].Role)
 	// catalog miss: snapshot path comes from caller (best-effort) since we
 	// can't derive it locally.
 	assert.Equal(t, "/legacy/fallback", snapPath)

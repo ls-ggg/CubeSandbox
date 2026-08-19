@@ -357,47 +357,6 @@ impl S3Engine {
         Ok(info)
     }
 
-    fn flatten_snapshot_from_snapshot(
-        &self,
-        src_snapshot: &str,
-        dst_snapshot: &str,
-    ) -> CubecowResult<()> {
-        let tmp = format!("{TMPCLONE_PREFIX}{}", uuid::Uuid::new_v4().simple());
-
-        self.rpc.call_typed(
-            "rcow_create_clone",
-            &serde_json::json!({
-                "snapshot_name": src_snapshot,
-                "clone_name": tmp,
-            }),
-        )?;
-
-        let snap_result = self.rpc.call_typed(
-            "rcow_create_snapshot",
-            &serde_json::json!({
-                "lvol_name": tmp,
-                "snapshot_name": dst_snapshot,
-            }),
-        );
-
-        let del_result = self.rpc.call_typed(
-            "rcow_delete_lvol",
-            &serde_json::json!({ "lvol_name": tmp }),
-        );
-
-        match (snap_result, del_result) {
-            (Ok(_), Ok(_)) => Ok(()),
-            (Ok(_), Err(e)) => {
-                warn!(
-                    tmp_clone = %tmp,
-                    error = %e,
-                    "flatten: failed to delete tmp clone; leaving for startup sweep",
-                );
-                Ok(())
-            }
-            (Err(e), _) => Err(e),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -717,7 +676,7 @@ impl Engine for S3Engine {
         (out, next_token, total)
     }
 
-    fn create_snapshot(
+    fn create_snapshot_from_volume(
         &self,
         source_name: &str,
         snapshot_name: &str,
@@ -725,20 +684,20 @@ impl Engine for S3Engine {
     ) -> CubecowResult<Snapshot> {
         Self::validate_name(snapshot_name, "snapshot")?;
 
-        let (source_is_snapshot, ultimate_origin, size_bytes) = {
+        let (ultimate_origin, size_bytes) = {
             let idx = self
                 .name_index
                 .read()
                 .expect("s3 name_index lock poisoned");
             match idx.get(source_name) {
                 Some(NameKind::Volume { size_bytes, .. }) => {
-                    (false, source_name.to_string(), *size_bytes)
+                    (source_name.to_string(), *size_bytes)
                 }
-                Some(NameKind::Snapshot {
-                    origin_volume,
-                    size_bytes,
-                    ..
-                }) => (true, origin_volume.clone(), *size_bytes),
+                Some(NameKind::Snapshot { .. }) => {
+                    return Err(CubecowError::InvalidArg(format!(
+                        "'{source_name}' is a snapshot; create_snapshot_from_volume only accepts a volume as source"
+                    )));
+                }
                 None => {
                     return Err(CubecowError::NotFound(format!(
                         "source '{source_name}' for snapshot"
@@ -770,19 +729,16 @@ impl Engine for S3Engine {
             );
         }
 
-        let rpc_res = if source_is_snapshot {
-            self.flatten_snapshot_from_snapshot(source_name, snapshot_name)
-        } else {
-            self.rpc
-                .call_typed(
-                    "rcow_create_snapshot",
-                    &serde_json::json!({
-                        "lvol_name": source_name,
-                        "snapshot_name": snapshot_name,
-                    }),
-                )
-                .map(|_| ())
-        };
+        let rpc_res = self
+            .rpc
+            .call_typed(
+                "rcow_create_snapshot",
+                &serde_json::json!({
+                    "lvol_name": source_name,
+                    "snapshot_name": snapshot_name,
+                }),
+            )
+            .map(|_| ());
         if let Err(e) = rpc_res {
             let mut idx = self
                 .name_index
@@ -837,6 +793,99 @@ impl Engine for S3Engine {
             "s3 snapshot created"
         );
         Self::project_snapshot(snapshot_name, &final_entry)
+    }
+
+    fn create_volume_from_snapshot(
+        &self,
+        source_snapshot: &str,
+        volume_name: &str,
+    ) -> CubecowResult<Volume> {
+        Self::validate_name(volume_name, "volume")?;
+
+        let mut idx = self
+            .name_index
+            .write()
+            .expect("s3 name_index lock poisoned");
+
+        // The source must be an existing snapshot. Cloning from a
+        // writable volume is intentionally rejected — callers who
+        // want a copy of a volume should snapshot it first and then
+        // clone the snapshot, so the RPC intent stays honest with
+        // the s3lvol `rcow_create_clone` semantics (its `snapshot_name`
+        // parameter is required to name an existing snapshot).
+        let size_bytes = match idx.get(source_snapshot) {
+            Some(NameKind::Snapshot { size_bytes, .. }) => *size_bytes,
+            Some(NameKind::Volume { .. }) => {
+                return Err(CubecowError::InvalidArg(format!(
+                    "'{source_snapshot}' is a volume; \
+                     create_volume_from_snapshot requires a snapshot as source"
+                )));
+            }
+            None => {
+                return Err(CubecowError::NotFound(format!(
+                    "snapshot '{source_snapshot}'"
+                )));
+            }
+        };
+        if idx.contains_key(volume_name) {
+            return Err(CubecowError::AlreadyExists(format!(
+                "name '{volume_name}' already exists in s3 namespace"
+            )));
+        }
+
+        self.rpc.call_typed(
+            "rcow_create_clone",
+            &serde_json::json!({
+                "snapshot_name": source_snapshot,
+                "clone_name": volume_name,
+            }),
+        )?;
+
+        // Auto-activate: mirror `create_volume`'s "volume ⇄ device
+        // lifetime" contract. Activation failure rolls back the whole
+        // create so callers never observe an orphan lvol. Because the
+        // index entry is only inserted after activation succeeds, a
+        // crash between `rcow_create_clone` and `rcow_active_bdev`
+        // leaves an orphan lvol on the s3lvol side — the startup
+        // sweep in `initialize_with_config` is responsible for
+        // reconciling that, same as for `create_volume`.
+        let bdev = match self.call_activate(volume_name) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(
+                    volume = volume_name,
+                    source_snapshot,
+                    error = %e,
+                    "s3 clone created but activation failed; rolling back"
+                );
+                let _ = self.rpc.call_typed(
+                    "rcow_deactive_bdev",
+                    &serde_json::json!({ "device_name": volume_name }),
+                );
+                let _ = self.rpc.call_typed(
+                    "rcow_delete_lvol",
+                    &serde_json::json!({ "lvol_name": volume_name }),
+                );
+                return Err(e);
+            }
+        };
+
+        let entry = NameKind::Volume {
+            size_bytes,
+            created_at: Utc::now().to_rfc3339(),
+            activated: Some(bdev),
+        };
+        idx.insert(volume_name.to_string(), entry.clone());
+        self.persist(&idx)?;
+
+        self.metrics.inc(METRIC_VOLUME_COUNT);
+        info!(
+            volume = volume_name,
+            source_snapshot,
+            size_bytes,
+            "s3 writable volume derived from snapshot"
+        );
+        Ok(Self::project_volume(volume_name, &entry))
     }
 
     fn delete_snapshot(&self, snapshot_name: &str) -> CubecowResult<()> {
@@ -938,7 +987,7 @@ impl Engine for S3Engine {
         // side. `rcow_active_bdev` + `rcow_get_bdev` are the only
         // steps required — there is no need to derive a paired
         // writable clone. Callers who want a writable working copy
-        // of a snapshot should explicitly `create_snapshot`-then-
+        // of a snapshot should explicitly `create_snapshot_from_volume`-then-
         // `activate` a clone (i.e. use snapshot-of-snapshot flatten
         // + activation) rather than piggy-back on this call.
         {
@@ -1081,6 +1130,7 @@ impl Engine for S3Engine {
             &serde_json::json!({
                 "lvol_name": lvol_name,
                 "export_uuid": export_uuid,
+                "decouple": true,
             }),
         ) {
             Ok(_) => {}
@@ -1089,13 +1139,19 @@ impl Engine for S3Engine {
         }
 
         // The imported volume's exact size in bytes is unknown at
-        // this point; record 0 as a sentinel.
-        let entry = NameKind::Volume {
-            size_bytes: 0,
-            created_at: Utc::now().to_rfc3339(),
-            activated: None,
-        };
-        idx.insert(lvol_name.to_string(), entry.clone());
+        // this point; record 0 as a sentinel. Persist the (not-yet-
+        // activated) entry first so a crash between `rcow_import_lvol`
+        // and `rcow_active_bdev` still leaves a consistent record on
+        // disk that can be re-activated after restart.
+        let created_at = Utc::now().to_rfc3339();
+        idx.insert(
+            lvol_name.to_string(),
+            NameKind::Volume {
+                size_bytes: 0,
+                created_at: created_at.clone(),
+                activated: None,
+            },
+        );
         if let Err(e) = self.persist(&idx) {
             let _ = self.rpc.call_typed(
                 "rcow_delete_lvol",
@@ -1104,6 +1160,41 @@ impl Engine for S3Engine {
             idx.remove(lvol_name);
             return Err(e);
         }
+
+        // Auto-activate: the API contract documented in
+        // `docs/design/zh/cubecow-api.md` §import_lvol requires that
+        // the returned Volume be "立即可用、device_path 非空". Mirror
+        // the `create_volume` rollback pattern on activation failure
+        // so callers never observe an orphan imported lvol.
+        let bdev = match self.call_activate(lvol_name) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(
+                    lvol = lvol_name,
+                    error = %e,
+                    "s3 lvol imported but activation failed; rolling back"
+                );
+                let _ = self.rpc.call_typed(
+                    "rcow_deactive_bdev",
+                    &serde_json::json!({ "device_name": lvol_name }),
+                );
+                let _ = self.rpc.call_typed(
+                    "rcow_delete_lvol",
+                    &serde_json::json!({ "lvol_name": lvol_name }),
+                );
+                idx.remove(lvol_name);
+                let _ = self.persist(&idx);
+                return Err(e);
+            }
+        };
+
+        let entry = NameKind::Volume {
+            size_bytes: 0,
+            created_at,
+            activated: Some(bdev),
+        };
+        idx.insert(lvol_name.to_string(), entry.clone());
+        self.persist(&idx)?;
 
         self.metrics.inc(METRIC_VOLUME_COUNT);
         info!(lvol = lvol_name, %export_uuid, "s3 volume imported");
@@ -1332,12 +1423,12 @@ fn extract_string_value(resp: &serde_json::Value) -> CubecowResult<String> {
 ///
 /// ```json
 /// {
-///   "export status": "NONE" | "INPROGRESS" | "DONE",
+///   "export_status": "NONE" | "INPROGRESS" | "DONE",
 ///   "deletable":     "YES"  | "NO"
 /// }
 /// ```
 ///
-/// The `export status` key contains a **space** — that is not a typo
+/// The `export_status` key contains a **space** — that is not a typo
 /// on our side. `deletable` is a stringly-typed YES/NO flag that we
 /// normalise to `Option<bool>` (`None` when the field is missing or
 /// carries an unrecognised value).
@@ -1348,7 +1439,7 @@ fn parse_snapshot_status(nested: &str) -> CubecowResult<(String, Option<bool>)> 
         ))
     })?;
     let status = v
-        .get("export status")
+        .get("export_status")
         .and_then(|s| s.as_str())
         .unwrap_or("")
         .to_string();
@@ -1555,19 +1646,19 @@ mod tests {
     fn parse_snapshot_status_handles_all_shapes() {
         // Happy path: DONE + deletable YES.
         let (status, deletable) =
-            parse_snapshot_status(r#"{"export status":"DONE","deletable":"YES"}"#).unwrap();
+            parse_snapshot_status(r#"{"export_status":"DONE","deletable":"YES"}"#).unwrap();
         assert_eq!(status, "DONE");
         assert_eq!(deletable, Some(true));
 
         // INPROGRESS + NO.
         let (status, deletable) =
-            parse_snapshot_status(r#"{"export status":"INPROGRESS","deletable":"NO"}"#).unwrap();
+            parse_snapshot_status(r#"{"export_status":"INPROGRESS","deletable":"NO"}"#).unwrap();
         assert_eq!(status, "INPROGRESS");
         assert_eq!(deletable, Some(false));
 
         // Unknown deletable value → None; unknown status stays as-is.
         let (status, deletable) =
-            parse_snapshot_status(r#"{"export status":"WAT","deletable":"maybe"}"#).unwrap();
+            parse_snapshot_status(r#"{"export_status":"WAT","deletable":"maybe"}"#).unwrap();
         assert_eq!(status, "WAT");
         assert_eq!(deletable, None);
 

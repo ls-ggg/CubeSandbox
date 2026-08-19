@@ -426,7 +426,7 @@ impl Engine for ReflinkEngine {
 
     fn delete_volume(&self, name: &str) -> CubecowResult<()> {
         // Take the writer lock, validate that it really is a volume,
-        // then unlink under the lock so a concurrent create_snapshot
+        // then unlink under the lock so a concurrent create_snapshot_from_volume
         // cannot race in between.
         let mut idx = self
             .name_index
@@ -643,7 +643,7 @@ impl Engine for ReflinkEngine {
         (out, next_token, total)
     }
 
-    fn create_snapshot(
+    fn create_snapshot_from_volume(
         &self,
         source_name: &str,
         snapshot_name: &str,
@@ -741,6 +741,110 @@ impl Engine for ReflinkEngine {
             idx.remove(snapshot_name);
             // ficlone() removes the dst file on failure; nothing else
             // to clean up.
+        }
+        result
+    }
+
+    fn create_volume_from_snapshot(
+        &self,
+        source_snapshot: &str,
+        volume_name: &str,
+    ) -> CubecowResult<Volume> {
+        // The reflink backend has no separate activation step: the
+        // device path *is* the file path, and the file exists from
+        // the moment FICLONE returns.
+        Self::validate_name(volume_name, "volume")?;
+
+        // Resolve source: must be an existing snapshot. Cloning from
+        // another volume is rejected — callers should snapshot first
+        // and then clone, mirroring the s3 backend contract.
+        let source_path = {
+            let idx = self
+                .name_index
+                .read()
+                .expect("reflink name_index lock poisoned");
+            match idx.get(source_snapshot) {
+                Some(NameKind::Snapshot { origin_volume }) => {
+                    self.snap_file(origin_volume, source_snapshot)
+                }
+                Some(NameKind::Volume) => {
+                    return Err(CubecowError::InvalidArg(format!(
+                        "'{source_snapshot}' is a volume; \
+                         create_volume_from_snapshot requires a snapshot as source"
+                    )));
+                }
+                None => {
+                    return Err(CubecowError::NotFound(format!(
+                        "snapshot '{source_snapshot}'"
+                    )));
+                }
+            }
+        };
+
+        // Reserve the target volume name atomically.
+        {
+            let mut idx = self
+                .name_index
+                .write()
+                .expect("reflink name_index lock poisoned");
+            if idx.contains_key(volume_name) {
+                return Err(CubecowError::AlreadyExists(format!(
+                    "name '{volume_name}' already exists in reflink namespace"
+                )));
+            }
+            idx.insert(volume_name.to_string(), NameKind::Volume);
+        }
+
+        let result = (|| -> CubecowResult<Volume> {
+            let dir = self.vol_dir(volume_name);
+            let main = self.vol_main_file(volume_name);
+
+            std::fs::create_dir_all(&dir).map_err(CubecowError::IoError)?;
+
+            let src_file = File::open(&source_path).map_err(|e| {
+                if e.kind() == ErrorKind::NotFound {
+                    CubecowError::NotFound(format!(
+                        "source snapshot file '{}' missing",
+                        source_path.display()
+                    ))
+                } else {
+                    CubecowError::IoError(e)
+                }
+            })?;
+
+            ficlone(&src_file, &main).map_err(|errno| {
+                let reason = describe_ficlone_errno(errno);
+                CubecowError::PreconditionFailed(format!(
+                    "FICLONE failed for volume '{volume_name}' from '{}': {reason}",
+                    source_path.display()
+                ))
+            })?;
+
+            // Persist directory entries.
+            let _ = fsync_dir(&dir);
+            let _ = fsync_dir(&self.volumes_dir);
+
+            self.metrics.inc(METRIC_VOLUME_COUNT);
+            info!(
+                volume = volume_name,
+                source_snapshot,
+                "reflink writable volume derived from snapshot"
+            );
+            self.project_volume(volume_name)
+        })();
+
+        if result.is_err() {
+            // Roll back the name reservation and best-effort clean up
+            // any partially-created files. `ficlone()` removes the dst
+            // on FICLONE failure, but the empty directory (and the
+            // dst file on non-FICLONE errors) may still be around.
+            let mut idx = self
+                .name_index
+                .write()
+                .expect("reflink name_index lock poisoned");
+            idx.remove(volume_name);
+            let _ = std::fs::remove_file(self.vol_main_file(volume_name));
+            let _ = std::fs::remove_dir(self.vol_dir(volume_name));
         }
         result
     }
@@ -1334,12 +1438,12 @@ mod tests {
         let engine = make_engine(&root);
 
         engine.create_volume("vol", 1024 * 1024).unwrap();
-        let s1 = engine.create_snapshot("vol", "s1", false).unwrap();
+        let s1 = engine.create_snapshot_from_volume("vol", "s1", false).unwrap();
         assert_eq!(s1.origin_volume, "vol");
         assert_eq!(s1.size_bytes, 1024 * 1024);
 
         // Snap-of-snap: flattened — origin_volume stays "vol".
-        let s2 = engine.create_snapshot("s1", "s2", false).unwrap();
+        let s2 = engine.create_snapshot_from_volume("s1", "s2", false).unwrap();
         assert_eq!(s2.origin_volume, "vol");
         assert!(s2.device_path.ends_with("/volumes/vol/s2"));
 
@@ -1398,10 +1502,10 @@ mod tests {
 
         engine.create_volume("a", 1024 * 1024).unwrap();
         // snapshot named "a" must conflict with the volume.
-        let bad = engine.create_snapshot("a", "a", false);
+        let bad = engine.create_snapshot_from_volume("a", "a", false);
         assert!(matches!(bad, Err(CubecowError::AlreadyExists(_))));
 
-        engine.create_snapshot("a", "snap1", false).unwrap();
+        engine.create_snapshot_from_volume("a", "snap1", false).unwrap();
         // volume named "snap1" must conflict with the snapshot.
         let bad = engine.create_volume("snap1", 1024 * 1024);
         assert!(matches!(bad, Err(CubecowError::AlreadyExists(_))));
@@ -1419,7 +1523,7 @@ mod tests {
         let engine = make_engine(&root);
 
         engine.create_volume("v", 1024 * 1024).unwrap();
-        engine.create_snapshot("v", "s", false).unwrap();
+        engine.create_snapshot_from_volume("v", "s", false).unwrap();
 
         let (old, new) = engine.resize_volume("v", 4 * 1024 * 1024).unwrap();
         assert_eq!(old, 1024 * 1024);
@@ -1453,7 +1557,7 @@ mod tests {
         {
             let engine = make_engine(&root);
             engine.create_volume("vol1", 1024 * 1024).unwrap();
-            engine.create_snapshot("vol1", "snapA", false).unwrap();
+        engine.create_snapshot_from_volume("vol1", "snapA", false).unwrap();
             engine.create_volume("vol2", 1024 * 1024).unwrap();
         }
 

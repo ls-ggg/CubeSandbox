@@ -56,7 +56,11 @@ func (e *Engine) ListVolumes(uint64, string) (*ListVolumesResult, error) {
 	return nil, fmt.Errorf(nativeBuildHint)
 }
 
-func (e *Engine) CreateSnapshot(string, string, bool) (string, error) {
+func (e *Engine) CreateSnapshotFromVolume(string, string, bool) (string, error) {
+	return "", fmt.Errorf(nativeBuildHint)
+}
+
+func (e *Engine) CreateVolumeFromSnapshot(string, string) (string, error) {
 	return "", fmt.Errorf(nativeBuildHint)
 }
 

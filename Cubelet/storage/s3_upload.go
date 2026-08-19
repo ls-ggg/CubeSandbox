@@ -91,6 +91,7 @@ func (m *S3Cow) uploadOne(name string) (string, error) {
 	if !ok || exp == nil {
 		return "", fmt.Errorf("cubecow engine does not support export_snapshot")
 	}
+	// Export is snapshot-only; volumes must be sealed to a snapshot before Upload.
 	uuid, err := exp.ExportSnapshot(name)
 	if err != nil {
 		return "", err

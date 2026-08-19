@@ -309,15 +309,8 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		return rsp, nil
 	}
 	stepLog.Info("cube-runtime snapshot executed successfully")
-
-	if err := writeMemoryDevFile(layout.MemoryWork, memoryObject.DevPath); err != nil {
-		stepLog.Errorf("Failed to write memory.dev: %v", err)
-		cleanupSnapshotObjects()
-		layout.discardTmpDir()
-		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-		rsp.Ret.RetMsg = fmt.Sprintf("failed to write memory.dev: %v", err)
-		return rsp, nil
-	}
+	// Do not write memory.dev: host-local /dev paths must not be baked into
+	// packages. Restore resolves memory via catalog vol name + ResolveDevPath.
 
 	rootfsObject, err = storage.CommitRootfsFromBuildFor(ctx, backend, templateID)
 	if err != nil {
@@ -332,16 +325,6 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 		rsp.Ret.RetMsg = fmt.Sprintf("failed to create template rootfs snapshot: %v", err)
 		return rsp, nil
-	}
-	if layout.DiskWork != layout.MetaWork {
-		if err := writeDiskDevFile(layout.DiskWork, rootfsObject.DevPath); err != nil {
-			stepLog.Errorf("Failed to write disk.dev: %v", err)
-			cleanupSnapshotObjects()
-			layout.discardTmpDir()
-			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
-			rsp.Ret.RetMsg = fmt.Sprintf("failed to write disk.dev: %v", err)
-			return rsp, nil
-		}
 	}
 
 	stepLog.Infof("Step 5: Destroying temporary cubebox (templateID=%s)...", templateID)
@@ -460,9 +443,12 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		// operators notice drift between master and cubelet local view.
 		stepLog.Warnf("failed to persist snapshot catalog for %s: %v", templateID, err)
 	}
+	if err := storage.FinalizeS3PackageSnapshots(ctx, backend, templateID); err != nil {
+		stepLog.Warnf("s3 finalize package snapshots %s failed: %v", templateID, err)
+	}
 
-	// Templates stay node-local: no cubecow_export_snapshot. Cross-node
-	// export applies to Pause and ordinary CommitSandbox snapshots only.
+	// Templates stay node-local: no Upload. Cross-node export applies to
+	// Pause and ordinary CommitSandbox snapshots only.
 
 	stepLog.Infof("AppSnapshot completed successfully: snapshotPath=%s", snapshotPath)
 	rsp.Ret.RetMsg = "success"
@@ -808,20 +794,6 @@ func alignUp(value, alignment uint64) uint64 {
 		return value
 	}
 	return value + alignment - value%alignment
-}
-
-func writeMemoryDevFile(snapshotPath, memoryDev string) error {
-	if memoryDev == "" {
-		return fmt.Errorf("memory dev path is empty")
-	}
-	return os.WriteFile(filepath.Join(snapshotPath, "memory.dev"), []byte(memoryDev+"\n"), 0644)
-}
-
-func writeDiskDevFile(snapshotPath, diskDev string) error {
-	if diskDev == "" {
-		return fmt.Errorf("disk dev path is empty")
-	}
-	return os.WriteFile(filepath.Join(snapshotPath, "disk.dev"), []byte(diskDev+"\n"), 0644)
 }
 
 func cleanupCowSnapshotObjects(ctx context.Context, stepLog *log.CubeWrapperLogEntry, memoryObject, rootfsObject *storage.CowSnapshotObject) {
