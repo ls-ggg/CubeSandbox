@@ -286,6 +286,49 @@ func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 	require.Contains(t, err.Error(), "node-local s3 metadata base")
 }
 
+func TestS3CowEmptyDevicePathAfterCreateFails(t *testing.T) {
+	engine := &fakeCowEngine{createVolumePath: ""}
+	store := &S3Cow{engine: engine}
+
+	_, _, err := store.createOrResolveVolumePath(context.Background(), "vol-empty", 8<<20)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty device_path")
+	require.Contains(t, err.Error(), "s3lvol/NVMe-oF")
+
+	_, err = store.createTemplateVolumePath("tpl-empty", 8<<20)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty device_path")
+}
+
+func TestS3CowEmptyDevicePathAfterActivateFails(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"vol-1": {DevicePath: "", SizeBytes: 8 << 20},
+		},
+		activatePaths: map[string]string{
+			"vol-1": "",
+		},
+	}
+	store := &S3Cow{engine: engine}
+	_, err := store.ResolveDevPath(context.Background(), "vol-1", cowKindVolume)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty device_path")
+	require.Contains(t, err.Error(), "ActivateVolume")
+	require.Contains(t, err.Error(), "refuse mkfs/mount")
+}
+
+func TestEnsureS3MetadataBaseFailsOnEmptyDevicePath(t *testing.T) {
+	stubS3MetadataMounts(t)
+	engine := &fakeCowEngine{createVolumePath: ""}
+	useTestCowStorage(t, engine)
+
+	err := EnsureS3MetadataBase(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty device_path")
+	require.NotContains(t, engine.createVolumes, "") // still attempted create
+	require.Equal(t, []string{S3MetadataBaseVolumeName}, engine.createVolumes)
+}
+
 func TestIsS3MetadataBaseName(t *testing.T) {
 	require.True(t, IsS3MetadataBaseName(S3MetadataBaseVolumeName))
 	require.True(t, IsS3MetadataBaseName(S3MetadataBaseSnapshotName))

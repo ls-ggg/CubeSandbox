@@ -71,6 +71,7 @@ type local struct {
 	s3CowEngine          *cubecow.Engine
 	cowManager           cowVolumeManager // XFS / xfscow Store (reflink handle)
 	s3CowManager         cowVolumeManager // S3 Store (s3 cubecow handle)
+	s3InitCancel         context.CancelFunc
 
 	// rcDB is the dedicated bbolt DB for the plugin-volume reference-count store.
 	// It is a sibling file to meta.db in the same db directory.
@@ -225,15 +226,8 @@ func (l *local) reinitCowEngine() error {
 		l.cowEngine = engine
 		CubeLog.Infof("cubecow xfs handle initialized from %s", initSource)
 	}
-	if l.s3CowEngine == nil {
-		engine, initSource, err := initS3CowEngine(l.config)
-		if err != nil {
-			CubeLog.Errorf("s3 cubecow handle reinit fail:%v", err)
-		} else {
-			l.s3CowEngine = engine
-			CubeLog.Infof("cubecow s3 handle initialized from %s", initSource)
-		}
-	}
+	// S3 handle is published only by startS3CowInitLoop after metadata base
+	// succeeds; do not bind it synchronously here.
 	return nil
 }
 
@@ -420,16 +414,13 @@ func (l *local) loopUpdateStatus(context context.Context) {
 }
 
 func (l *local) Close() error {
+	l.stopS3CowInitLoop()
 	if l.cowEngine != nil {
 		l.cowEngine.Close()
 		l.cowEngine = nil
 	}
-	if l.s3CowEngine != nil {
-		l.s3CowEngine.Close()
-		l.s3CowEngine = nil
-	}
+	l.clearS3Cow()
 	l.cowManager = nil
-	l.s3CowManager = nil
 	return nil
 }
 
@@ -704,9 +695,7 @@ func (l *local) Init(ctx context.Context, opts *workflow.InitInfo) error {
 		if err := l.ensureCowManager(); err != nil {
 			return err
 		}
-		if err := EnsureS3MetadataReady(ctx); err != nil {
-			return err
-		}
+		l.startS3CowInitLoop(ctx)
 	} else {
 		if err := l.initEmptyDir(); err != nil {
 			return err
@@ -1183,6 +1172,7 @@ func (l *local) storeForBackend(backend string) (cow.Store, error) {
 		if l.s3CowManager != nil {
 			return l.s3CowManager, nil
 		}
+		return nil, ErrS3NotReady
 	default:
 		if l.cowManager != nil {
 			return l.cowManager, nil
@@ -1194,7 +1184,7 @@ func (l *local) storeForBackend(backend string) (cow.Store, error) {
 	switch normalized {
 	case cow.BackendS3:
 		if l.s3CowManager == nil {
-			return nil, fmt.Errorf("s3 cow store is not initialized")
+			return nil, ErrS3NotReady
 		}
 		return l.s3CowManager, nil
 	default:

@@ -122,8 +122,10 @@ func (f *fakeCowEngine) ActivateVolume(name string) (string, error) {
 		return "", f.activateErr
 	}
 	path := "/dev/mapper/" + name
-	if f.activatePaths != nil && f.activatePaths[name] != "" {
-		path = f.activatePaths[name]
+	if f.activatePaths != nil {
+		if p, ok := f.activatePaths[name]; ok {
+			path = p
+		}
 	}
 	if f.volumeInfos == nil {
 		f.volumeInfos = map[string]*cubecow.Volume{}

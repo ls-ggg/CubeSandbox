@@ -156,7 +156,8 @@ func (a storeActivator) Activate(ctx context.Context, snapshotID string) error {
 }
 
 // StoreFor returns the live XFS or S3 [cow.Store] for backend (request `type`).
-// Both Stores are initialized together when cubecow storage is enabled.
+// XFS is ready after plugin init; S3 returns [ErrS3NotReady] until the
+// background s3lvol init loop publishes the S3 handle.
 func StoreFor(backend string) (cow.Store, error) {
 	if localStorage == nil {
 		return nil, fmt.Errorf("storage is not initialized")

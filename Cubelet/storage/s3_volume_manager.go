@@ -7,6 +7,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
@@ -69,10 +70,18 @@ func (m *S3Cow) createOrResolveVolumePath(ctx context.Context, name string, size
 		}
 		return devPath, false, nil
 	}
+	devPath, err = requireS3DevicePath(name, "CreateVolume", devPath)
+	if err != nil {
+		return "", false, err
+	}
 	return devPath, true, nil
 }
 
 func (m *S3Cow) initializeNewDefaultMediumVolume(ctx context.Context, name, devPath string) error {
+	devPath, err := requireS3DevicePath(name, "CreateVolume", devPath)
+	if err != nil {
+		return err
+	}
 	if err := initDefaultMediumDevice(devPath); err != nil {
 		if cleanupErr := m.DeleteByKind(ctx, name, cowKindVolume); cleanupErr != nil {
 			return fmt.Errorf("initialize cubecow default medium %s at %s: %w (cleanup failed: %v)", name, devPath, err, cleanupErr)
@@ -220,7 +229,7 @@ func (m *S3Cow) createTemplateVolumePath(name string, sizeBytes uint64) (string,
 		}
 		return "", err
 	}
-	return devPath, nil
+	return requireS3DevicePath(name, "CreateVolume", devPath)
 }
 
 func (m *S3Cow) createTemplateSnapshotPath(sourceName, snapshotName string) (string, error) {
@@ -270,8 +279,9 @@ func (m *S3Cow) createOrResolveVolumeFromSnapshot(ctx context.Context, sourceSna
 		if err != nil {
 			return "", err
 		}
+		return devPath, nil
 	}
-	return devPath, nil
+	return requireS3DevicePath(volumeName, "CreateVolumeFromSnapshot", devPath)
 }
 
 func (m *S3Cow) createOrResolveSnapshotPathFromSource(ctx context.Context, sourceName, snapshotName string) (string, error) {
@@ -287,8 +297,9 @@ func (m *S3Cow) createOrResolveSnapshotPathFromSource(ctx context.Context, sourc
 		if err != nil {
 			return "", err
 		}
+		return devPath, nil
 	}
-	return devPath, nil
+	return requireS3DevicePath(snapshotName, "CreateSnapshotFromVolume", devPath)
 }
 
 func (m *S3Cow) ensureSnapshotOrigin(sourceName, snapshotName string) error {
@@ -368,12 +379,28 @@ func (m *S3Cow) ResolveDevPath(ctx context.Context, name, kind string) (string, 
 		if err != nil {
 			return "", err
 		}
-		if devPath == "" {
-			return "", fmt.Errorf("cubecow object %q has empty device path after activate", name)
-		}
-		return devPath, nil
+		return requireS3DevicePath(name, "ActivateVolume", devPath)
 	}
-	return info.DevicePath, nil
+	return strings.TrimSpace(info.DevicePath), nil
+}
+
+// errS3EmptyDevicePath explains that s3lvol activated the object but the host
+// NVMe-oF path is missing. Callers must not continue to mkfs/mount/format.
+func errS3EmptyDevicePath(name, op string) error {
+	name = strings.TrimSpace(name)
+	op = strings.TrimSpace(op)
+	if op == "" {
+		op = "activate"
+	}
+	return fmt.Errorf("s3 cubecow object %q has empty device_path after %s (s3lvol/NVMe-oF host path not ready; refuse mkfs/mount)", name, op)
+}
+
+func requireS3DevicePath(name, op, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errS3EmptyDevicePath(name, op)
+	}
+	return path, nil
 }
 
 func (m *S3Cow) GetSizeBytes(ctx context.Context, name string) (uint64, error) {

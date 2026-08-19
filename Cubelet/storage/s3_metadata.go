@@ -137,8 +137,14 @@ func cowObjectPresent(info *cubecow.Volume, err error) (bool, error) {
 }
 
 func requireS3Cow() (*S3Cow, error) {
+	s3CowOverrideMu.Lock()
+	override := s3CowOverride
+	s3CowOverrideMu.Unlock()
+	if override != nil {
+		return override, nil
+	}
 	if localStorage == nil || localStorage.s3CowManager == nil {
-		return nil, nil
+		return nil, ErrS3NotReady
 	}
 	store, ok := localStorage.s3CowManager.(*S3Cow)
 	if !ok || store == nil {
@@ -163,9 +169,6 @@ func EnsureS3MetadataBase(ctx context.Context) error {
 	store, err := requireS3Cow()
 	if err != nil {
 		return err
-	}
-	if store == nil {
-		return nil
 	}
 
 	s3MetadataMu.Lock()
@@ -212,6 +215,11 @@ func EnsureS3MetadataBase(ctx context.Context) error {
 	devPath, created, err := store.createOrResolveVolumePath(ctx, name, s3MetadataBaseSizeBytes)
 	if err != nil {
 		return fmt.Errorf("create s3 metadata base %s: %w", name, err)
+	}
+	devPath, err = requireS3DevicePath(name, "CreateVolume", devPath)
+	if err != nil {
+		_ = store.DeleteByKind(ctx, name, cowKindVolume)
+		return err
 	}
 	if created || !state.Base.Formatted {
 		if err := formatS3MetadataBaseDevice(devPath); err != nil {
@@ -826,7 +834,7 @@ func writeS3MetadataKV(body []byte) error {
 func formatS3MetadataBaseDeviceImpl(devicePath string) error {
 	devicePath = strings.TrimSpace(devicePath)
 	if devicePath == "" {
-		return fmt.Errorf("s3 metadata base device path is required")
+		return errS3EmptyDevicePath(S3MetadataBaseVolumeName, "CreateVolume")
 	}
 	// Use 4096-byte blocks: s3lvol NVMe devices typically expose 4K
 	// physical/logical sectors, and mkfs.ext4 -b 1024 fails with
@@ -843,6 +851,10 @@ func formatS3MetadataBaseDeviceImpl(devicePath string) error {
 }
 
 func mountS3MetadataDeviceImpl(devicePath, mountPath string) error {
+	devicePath = strings.TrimSpace(devicePath)
+	if devicePath == "" {
+		return errS3EmptyDevicePath("metadata", "ActivateVolume")
+	}
 	if _, stderr, err := utils.ExecV([]string{"mount", devicePath, mountPath}, cmdTimeout); err != nil {
 		return fmt.Errorf("mount s3 metadata %s at %s failed:%s", devicePath, mountPath, stderr)
 	}

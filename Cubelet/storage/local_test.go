@@ -846,10 +846,13 @@ func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 	oldReset := cowResetNodeStorage
 	oldInit := initCowEngine
 	oldS3Init := initS3CowEngine
+	oldMeta := ensureS3MetadataReadyFn
 	t.Cleanup(func() {
 		cowResetNodeStorage = oldReset
 		initCowEngine = oldInit
 		initS3CowEngine = oldS3Init
+		ensureS3MetadataReadyFn = oldMeta
+		s.stopS3CowInitLoop()
 	})
 
 	resetCalls := 0
@@ -868,13 +871,16 @@ func TestInitResetsCowStorageAndReinitializesEngine(t *testing.T) {
 		assert.Same(t, cfg, got)
 		return newS3Engine, "test-s3-config", nil
 	}
+	ensureS3MetadataReadyFn = func(context.Context) error { return nil }
 
 	require.NoError(t, s.Init(context.Background(), nil))
 	assert.Equal(t, 1, resetCalls)
 	assert.Same(t, newEngine, s.cowEngine)
-	assert.Same(t, newS3Engine, s.s3CowEngine)
 	assert.NotNil(t, s.cowManager)
-	assert.NotNil(t, s.s3CowManager)
+
+	require.Eventually(t, func() bool {
+		return s.s3CowEngine == newS3Engine && s.s3CowManager != nil
+	}, 2*time.Second, 20*time.Millisecond)
 
 	_, err := os.Stat(staleVolumes)
 	assert.True(t, os.IsNotExist(err))

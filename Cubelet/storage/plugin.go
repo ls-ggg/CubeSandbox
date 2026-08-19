@@ -416,13 +416,6 @@ func init() {
 				}
 				localStorage.cowEngine = eng
 				CubeLog.Infof("cubecow xfs handle initialized from %s", initSource)
-				s3eng, s3Source, s3err := initS3CowEngine(localStorage.config)
-				if s3err != nil {
-					CubeLog.Errorf("plugin %s s3 cubecow handle init fail:%v", constants.StorageID, s3err)
-				} else {
-					localStorage.s3CowEngine = s3eng
-					CubeLog.Infof("cubecow s3 handle initialized from %s", s3Source)
-				}
 			}
 
 			cubeboxAPIObj, err := ic.GetByID(constants.CubeStorePlugin, constants.CubeboxID.ID())
@@ -447,10 +440,10 @@ func init() {
 			SetSnapshotCatalogRootsFor(cow.BackendXFS, catalogKindRoots(cow.BackendXFS)...)
 			SetSnapshotCatalogRootsFor(cow.BackendS3, catalogKindRoots(cow.BackendS3)...)
 
-			if err := EnsureS3MetadataReady(ic.Context); err != nil {
-				CubeLog.Errorf("plugin %s s3 metadata base init fail:%v", constants.StorageID, err)
-				return nil, err
-			}
+			// S3 cubecow + metadata base: background retry so cubelet does
+			// not depend on s3lvol being up at startup. S3 requests fail
+			// with ErrS3NotReady until the loop succeeds.
+			localStorage.startS3CowInitLoop(ic.Context)
 
 			return localStorage, nil
 		},

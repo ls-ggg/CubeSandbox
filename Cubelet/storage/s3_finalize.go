@@ -29,12 +29,13 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 	if id == "" {
 		return fmt.Errorf("snapshot_id is required")
 	}
-	store, err := requireS3Cow()
+	store, err := requireCowStoreFor(cow.BackendS3)
 	if err != nil {
 		return err
 	}
-	if store == nil {
-		return fmt.Errorf("s3 cow store is not initialized")
+	s3store, ok := store.(*S3Cow)
+	if !ok || s3store == nil {
+		return fmt.Errorf("s3 cow store is not *S3Cow")
 	}
 	entry, err := GetLocalSnapshotFor(ctx, cow.BackendS3, id)
 	if err != nil || entry == nil {
@@ -49,7 +50,7 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 
 	changed := false
 	if memoryWork != "" {
-		snap, sealed, sealErr := store.sealVolumeToSnapshot(ctx, memoryWork)
+		snap, sealed, sealErr := s3store.sealVolumeToSnapshot(ctx, memoryWork)
 		if sealErr != nil {
 			return fmt.Errorf("seal memory %s: %w", memoryWork, sealErr)
 		}
@@ -67,13 +68,13 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 		if strings.HasSuffix(metaWork, "-snap") {
 			desiredSnap = metaWork
 		}
-		info, infoErr := store.GetVolumeInfo(ctx, metaWork)
+		info, infoErr := s3store.GetVolumeInfo(ctx, metaWork)
 		exists, existsErr := cowObjectPresent(info, infoErr)
 		if existsErr != nil {
 			return existsErr
 		}
 		if exists {
-			snap, sealed, sealErr := store.sealVolumeToSnapshotAs(ctx, metaWork, desiredSnap)
+			snap, sealed, sealErr := s3store.sealVolumeToSnapshotAs(ctx, metaWork, desiredSnap)
 			if sealErr != nil {
 				return fmt.Errorf("seal metadata %s: %w", metaWork, sealErr)
 			}
@@ -82,7 +83,7 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 				entry.MetadataKind = cowKindSnapshot
 				changed = true
 			}
-		} else if snapInfo, snapErr := store.GetVolumeInfo(ctx, desiredSnap); snapErr == nil && snapInfo != nil {
+		} else if snapInfo, snapErr := s3store.GetVolumeInfo(ctx, desiredSnap); snapErr == nil && snapInfo != nil {
 			if strings.TrimSpace(entry.MetadataVol) != desiredSnap || strings.TrimSpace(entry.MetadataKind) != cowKindSnapshot {
 				entry.MetadataVol = desiredSnap
 				entry.MetadataKind = cowKindSnapshot
@@ -113,13 +114,13 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 	var cleanupErr error
 	memorySnap := strings.TrimSpace(entry.MemoryVol)
 	if memoryWork != "" && memoryWork != memorySnap && !strings.HasSuffix(memoryWork, "-snap") {
-		if err := store.DeleteByKind(ctx, memoryWork, cowKindVolume); err != nil {
+		if err := s3store.DeleteByKind(ctx, memoryWork, cowKindVolume); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete memory work %s: %w", memoryWork, err))
 		}
 	}
 	metaSnap := strings.TrimSpace(entry.MetadataVol)
 	if metaWork != "" && metaWork != metaSnap && !IsS3MetadataBaseName(metaWork) && !strings.HasSuffix(metaWork, "-snap") {
-		if err := store.DeleteByKind(ctx, metaWork, cowKindVolume); err != nil {
+		if err := s3store.DeleteByKind(ctx, metaWork, cowKindVolume); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete metadata work %s: %w", metaWork, err))
 		}
 	}
