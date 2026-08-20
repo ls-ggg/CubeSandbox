@@ -441,7 +441,10 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	}
 	// Drop CubeProxy local_cache so the new SandboxIP is used immediately
 	// (cache hits renew TTL and would otherwise keep routing to the old NIC).
-	cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
+	// A purge that fails leaves the sandbox unreachable for good, so it has
+	// to reach the caller — but only after the bookkeeping below, which
+	// describes a sandbox that is by now running whatever the proxy thinks.
+	purgeErr := cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
 
 	// The sandbox now lives on the target, but the origin still holds the
 	// PAUSED CubeBox row Pause left behind. Same-node Resume replaces that
@@ -465,6 +468,14 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		log.G(ctx).Warnf("resume: delete pause snap meta %s: %v", snapID, err)
 	}
 	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "resume", req.RequestID)
+
+	if purgeErr != nil {
+		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterInternalError)
+		rsp.Ret.RetMsg = fmt.Sprintf(
+			"sandbox %s resumed on %s but CubeProxy kept its pre-pause route and will not reach it: %v",
+			req.SandboxID, targetIP, purgeErr)
+		log.G(ctx).Errorf("resume: %s", rsp.Ret.RetMsg)
+	}
 	return rsp
 }
 
