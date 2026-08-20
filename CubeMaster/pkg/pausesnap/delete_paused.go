@@ -91,6 +91,25 @@ func isShimGonePauseSnapshot(status string) bool {
 	return strings.EqualFold(status, statusReady) || strings.EqualFold(status, statusDeleteFailed)
 }
 
+// DropOriginTombstone removes the PAUSED CubeBox row Pause left on originIP
+// after the sandbox came back up on a different node. Same-node Resume has
+// no use for this: there, target Create replaces the row in place.
+//
+// Only the row goes. The pause package and its cubecow objects stay, exactly
+// as they do after a same-node Resume.
+//
+// This talks to Cubelet directly rather than going through Master's
+// DestroySandbox, which would publish a lifecycle delete event and make the
+// CLM stop managing a sandbox that is very much alive on the target node.
+func DropOriginTombstone(ctx context.Context, requestID, sandboxID, originIP string) error {
+	sandboxID = strings.TrimSpace(sandboxID)
+	originIP = strings.TrimSpace(originIP)
+	if sandboxID == "" || originIP == "" {
+		return nil
+	}
+	return destroyPausedTombstone(ctx, cubeletAddr(originIP), requestID, sandboxID, originIP)
+}
+
 func destroyPausedTombstone(ctx context.Context, addr, requestID, sandboxID, hostIP string) error {
 	destroyRsp, err := destroyOnCubelet(ctx, addr, &cubebox.DestroyCubeSandboxRequest{
 		RequestID: requestID,
