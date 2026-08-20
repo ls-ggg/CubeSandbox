@@ -78,11 +78,12 @@ type VolumeRemoteInfo struct {
 // RemoteStatus is upload progress plus local volume info.
 // State comes from cubecow export_status (NONE/empty/INPROGRESS/DONE).
 type RemoteStatus struct {
-	SnapshotID   string             `json:"snapshot_id"`
-	State        string             `json:"state"`
-	Message      string             `json:"message,omitempty"`
-	RemoteUUIDs  *RemoteUUIDs       `json:"remote_uuids,omitempty"`
-	LocalVolumes []VolumeRemoteInfo `json:"local_volumes,omitempty"`
+	SnapshotID      string             `json:"snapshot_id"`
+	State           string             `json:"state"`
+	Message         string             `json:"message,omitempty"`
+	RemoteUUIDs     *RemoteUUIDs       `json:"remote_uuids,omitempty"`
+	LocalVolumes    []VolumeRemoteInfo `json:"local_volumes,omitempty"`
+	RootfsDeletable *bool              `json:"rootfs_deletable,omitempty"`
 }
 
 // Uploader publishes local snapshot volumes to the remote store

@@ -270,6 +270,26 @@ func TestTryDeletePausedCleanupErrorKeepsBinding(t *testing.T) {
 	rec, getErr := GetBySandbox(context.Background(), "sb-cleanup")
 	require.NoError(t, getErr)
 	require.Equal(t, "snap-cleanup0000000000000001", rec.SnapshotID)
+	require.Equal(t, statusDeleteFailed, rec.Status)
+	require.Contains(t, rec.LastError, "cubelet unreachable")
+}
+
+func TestTryDeletePausedRetriesDeleteFailedWithTombstone(t *testing.T) {
+	db := setupPauseDeleteTest(t)
+	seedPauseBinding(t, db, "sb-retry", "snap-retry0000000000000000001", statusDeleteFailed, "10.0.0.7")
+	destroys, cleans := mockCubeletOK(t)
+
+	handled, err := TryDeletePaused(context.Background(), "req-retry", "sb-retry", "10.0.0.1")
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.Len(t, *destroys, 1)
+	require.Equal(t, "true", (*destroys)[0].req.Annotations[constants.CubeAnnotationPauseDeleteTombstone],
+		"a delete that already reaped the shim must not try to kill it again")
+	require.Len(t, *cleans, 1)
+	require.Equal(t, "snap-retry0000000000000000001", (*cleans)[0].req.TemplateID)
+
+	_, err = GetBySandbox(context.Background(), "sb-retry")
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestCheckDestroyRet(t *testing.T) {

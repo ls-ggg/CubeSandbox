@@ -114,6 +114,42 @@ func DefaultTemplateObjectRefs(templateID string) []CowObjectRef {
 	}
 }
 
+// AppendS3SealedPackageCleanupRefs adds the sealed package names that
+// Finalize leaves behind (memory-snap, metadata work／snap). Catalog entries
+// often list only the live MemoryVol and miss the -snap after umount.
+func AppendS3SealedPackageCleanupRefs(templateID string, refs []CowObjectRef) []CowObjectRef {
+	templateID = strings.TrimSpace(templateID)
+	if templateID == "" {
+		return refs
+	}
+	seen := make(map[string]struct{}, len(refs)+4)
+	out := make([]CowObjectRef, 0, len(refs)+4)
+	for _, ref := range refs {
+		name := strings.TrimSpace(ref.Name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, ref)
+	}
+	for _, extra := range []CowObjectRef{
+		{Name: cowTemplateMemoryName(templateID) + "-snap", Kind: cowKindSnapshot, Role: "memory"},
+		{Name: cowTemplateMemoryName(templateID), Kind: cowKindVolume, Role: "memory"},
+		{Name: S3MetadataVolumeName(templateID), Kind: cowKindVolume, Role: "metadata"},
+		{Name: S3MetadataSnapshotName(templateID), Kind: cowKindSnapshot, Role: "metadata"},
+	} {
+		if _, ok := seen[extra.Name]; ok {
+			continue
+		}
+		seen[extra.Name] = struct{}{}
+		out = append(out, extra)
+	}
+	return out
+}
+
 // TemplateBuildRootfsName returns the deterministic cubecow volume name used
 // for a template's temporary writable working layer during AppSnapshot. Exposed
 // so non-storage callers (e.g. AppSnapshot handler writing snapshot catalog)
@@ -300,6 +336,16 @@ func normalizeCowKind(kind string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported cubecow kind %q", kind)
 	}
+}
+
+// normalizeCowKindForCleanup prefers snapshot when the object name is a
+// sealed *-snap (template memory-snap, metadata snap). Empty kind + role
+// memory would otherwise default to volume and miss the activated snap.
+func normalizeCowKindForCleanup(kind, role, name string) (string, error) {
+	if strings.TrimSpace(kind) == "" && strings.HasSuffix(strings.TrimSpace(name), "-snap") {
+		return cowKindSnapshot, nil
+	}
+	return normalizeCowKindForRole(kind, role)
 }
 
 // normalizeCowKindForRole resolves a cubecow kind, defaulting an empty/blank

@@ -119,6 +119,7 @@ type snapshotResource struct {
 	DisplayName               string                         `json:"display_name,omitempty"`
 	OriginSandboxID           string                         `json:"origin_sandbox_id,omitempty"`
 	OriginNodeID              string                         `json:"origin_node_id,omitempty"`
+	OriginNodeIP              string                         `json:"origin_node_ip,omitempty"`
 	StorageBackend            string                         `json:"storage_backend,omitempty"`
 	Backend                   string                         `json:"backend,omitempty"`
 	RemoteStatus              string                         `json:"remote_status,omitempty"`
@@ -795,6 +796,7 @@ func snapshotResourceFromInfo(info *templatecenter.SnapshotInfo) *snapshotResour
 		DisplayName:               info.DisplayName,
 		OriginSandboxID:           info.OriginSandboxID,
 		OriginNodeID:              info.OriginNodeID,
+		OriginNodeIP:              info.OriginNodeIP,
 		StorageBackend:            firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
 		Backend:                   firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
 		RemoteStatus:              info.RemoteStatus,

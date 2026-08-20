@@ -25,6 +25,13 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
+const (
+	// runTemplateSnapshotDir / runTemplateConfigFile locate the cube-runtime
+	// config inside a package metadata dir: <meta>/snapshot/config.json.
+	runTemplateSnapshotDir = "snapshot"
+	runTemplateConfigFile  = "config.json"
+)
+
 type RunTemplateManager interface {
 	SetInstanceType(instanceType string)
 
@@ -226,7 +233,49 @@ func (h *localCubeRunTemplateManager) SetInstanceType(instanceType string) {
 }
 
 func (h *localCubeRunTemplateManager) recoverS3LocalTemplates(ctx context.Context, templateID string) error {
+	mountS3PackageMetadataForRecovery(ctx, templateID)
 	return h.recoverBackendMetadataHomes(ctx, cow.BackendS3, "s3", templateID)
+}
+
+// mountS3PackageMetadataForRecovery makes an S3 package's run-template
+// metadata readable before the recovery scan looks for it.
+//
+// config.json lives on the package metadata disk, which Finalize seals and
+// unmounts, so a package that is on this node still shows an empty metadata
+// dir on the host. Mounting it here is what lets a package imported from
+// another node stand in for a template that was never built locally.
+func mountS3PackageMetadataForRecovery(ctx context.Context, templateID string) {
+	id := strings.TrimSpace(templateID)
+	if id == "" {
+		return
+	}
+	for _, kind := range []string{storage.SnapshotKindNormal, storage.SnapshotKindPause} {
+		home := storage.SnapshotHome(cow.BackendS3, kind, id)
+		if home == "" {
+			continue
+		}
+		if st, err := os.Stat(home); err != nil || !st.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(metadataHomeConfigPath(home)); err == nil {
+			return
+		}
+		metaDir := filepath.Join(home, storage.SnapshotMetadataDir)
+		if err := storage.MountS3MetadataAt(ctx, cow.BackendS3, id, metaDir); err != nil {
+			log.G(ctx).WithFields(CubeLog.Fields{
+				"template_id": id,
+				"meta_dir":    metaDir,
+				"err":         err.Error(),
+			}).Warn("failed to mount s3 package metadata for template recovery")
+		}
+		return
+	}
+}
+
+// metadataHomeConfigPath is the cube-runtime config a package home must have
+// for the recovery scan to accept it as a run template.
+func metadataHomeConfigPath(home string) string {
+	return filepath.Join(home, storage.SnapshotMetadataDir, runTemplateSnapshotDir, runTemplateConfigFile)
 }
 
 func (h *localCubeRunTemplateManager) recoverBackendMetadataHomes(ctx context.Context, backend, media, templateID string) error {
@@ -243,9 +292,9 @@ func (h *localCubeRunTemplateManager) recoverMetadataHomes(ctx context.Context, 
 	if kindRoot == "" {
 		return nil
 	}
-	pattern := filepath.Join(kindRoot, "*", storage.SnapshotMetadataDir, "snapshot", "config.json")
+	pattern := metadataHomeConfigPath(filepath.Join(kindRoot, "*"))
 	if templateID != "" {
-		pattern = filepath.Join(kindRoot, templateID, storage.SnapshotMetadataDir, "snapshot", "config.json")
+		pattern = metadataHomeConfigPath(filepath.Join(kindRoot, templateID))
 	}
 	configPaths, err := filepath.Glob(pattern)
 	if err != nil {
@@ -284,7 +333,7 @@ func recoveredS3LocalTemplate(home, metaDir string) *templatetypes.LocalRunTempl
 	if isTemporarySnapshotPath(home) {
 		return nil
 	}
-	configPath := filepath.Join(metaDir, "snapshot", "config.json")
+	configPath := filepath.Join(metaDir, runTemplateSnapshotDir, runTemplateConfigFile)
 	if _, err := os.Stat(configPath); err != nil {
 		return nil
 	}

@@ -5,6 +5,7 @@
 package cube
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/httpservice/common"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
@@ -58,6 +60,8 @@ type templateSummary struct {
 	DisplayName    string `json:"display_name,omitempty"`
 	StorageBackend string `json:"storage_backend,omitempty"`
 	Backend        string `json:"backend,omitempty"`
+	OriginNodeID   string `json:"origin_node_id,omitempty"`
+	OriginNodeIP   string `json:"origin_node_ip,omitempty"`
 	CreatedAt      string `json:"created_at,omitempty"`
 	ImageInfo      string `json:"image_info,omitempty"`
 	JobID          string `json:"job_id,omitempty"`
@@ -454,6 +458,18 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 		Data: make([]templateSummary, 0, len(infos)),
 	}
 	for _, info := range infos {
+		originNodeID := strings.TrimSpace(info.OriginNodeID)
+		originNodeIP := ""
+		if originNodeID != "" {
+			if n, ok := localcache.GetNode(originNodeID); ok && n != nil {
+				originNodeIP = strings.TrimSpace(n.HostIP())
+			}
+		}
+		// create-from-image templates often have empty origin_node_id; fall
+		// back to any READY replica so ops --s3 deletable can dial cubelet.
+		if originNodeIP == "" {
+			originNodeID, originNodeIP = firstReadyReplicaOrigin(r.Context(), info.TemplateID, originNodeID)
+		}
 		rsp.Data = append(rsp.Data, templateSummary{
 			TemplateID:     info.TemplateID,
 			InstanceType:   info.InstanceType,
@@ -463,6 +479,8 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 			DisplayName:    info.DisplayName,
 			StorageBackend: info.StorageBackend,
 			Backend:        firstNonEmptyTrimmed(info.Backend, info.StorageBackend),
+			OriginNodeID:   originNodeID,
+			OriginNodeIP:   originNodeIP,
 			CreatedAt:      info.CreatedAt,
 			ImageInfo:      info.ImageInfo,
 			JobID:          info.JobID,
@@ -470,4 +488,35 @@ func listTemplates(r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	}
 	rt.RetCode = int64(errorcode.ErrorCode_Success)
 	return rsp
+}
+
+func firstReadyReplicaOrigin(ctx context.Context, templateID, originNodeID string) (string, string) {
+	templateID = strings.TrimSpace(templateID)
+	if templateID == "" {
+		return originNodeID, ""
+	}
+	replicas, err := templatecenter.ListReplicas(ctx, templateID)
+	if err != nil {
+		return originNodeID, ""
+	}
+	for _, replica := range replicas {
+		if !strings.EqualFold(strings.TrimSpace(replica.Status), templatecenter.ReplicaStatusReady) {
+			continue
+		}
+		nodeID := strings.TrimSpace(replica.NodeID)
+		nodeIP := strings.TrimSpace(replica.NodeIP)
+		if nodeIP == "" && nodeID != "" {
+			if n, ok := localcache.GetNode(nodeID); ok && n != nil {
+				nodeIP = strings.TrimSpace(n.HostIP())
+			}
+		}
+		if nodeIP == "" {
+			continue
+		}
+		if originNodeID == "" {
+			originNodeID = nodeID
+		}
+		return originNodeID, nodeIP
+	}
+	return originNodeID, ""
 }

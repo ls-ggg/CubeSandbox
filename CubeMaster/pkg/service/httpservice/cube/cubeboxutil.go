@@ -643,6 +643,7 @@ func bindSnapshotCreateReplicaWithPlacement(ctx context.Context, snapshotID stri
 
 	if placement.CrossNode {
 		reqInOut.Annotations[constants.CubeAnnotationSnapshotAllowNonLocal] = "true"
+		reqInOut.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
 		if resolved := templateResolveResultFromContext(ctx); resolved != nil {
 			resolved.ChosenReplica = templatecenter.ReplicaStatus{
 				NodeID:       placement.NodeID,

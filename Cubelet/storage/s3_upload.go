@@ -142,6 +142,7 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 		allDone      = true
 		anyProgress  bool
 		anyNone      bool
+		anyDead      bool
 		localVolumes []cow.VolumeRemoteInfo
 		messages     []string
 	)
@@ -159,6 +160,10 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 		vol := cow.VolumeRemoteInfo{Name: ref.Name, Role: ref.Role, Exists: exists}
 		if info != nil {
 			vol.DevicePath = strings.TrimSpace(info.DevicePath)
+			if ref.Role == "rootfs" && info.Deletable != nil {
+				v := *info.Deletable
+				st.RootfsDeletable = &v
+			}
 		}
 		localVolumes = append(localVolumes, vol)
 		if !exists {
@@ -195,14 +200,24 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 				}
 			}
 		}
-		switch status {
-		case cow.ExportStatusDone:
+		switch {
+		case status == cow.ExportStatusDone:
 			// ok
-		case cow.ExportStatusInProgress, "":
-			// Empty means cubecow has not reported yet — still uploading.
+		case status == "" && uuid != "":
+			// A recorded uuid that reports no status at all is a dead
+			// export: s3lvol hands the uuid back before the transfer can
+			// fail, then records nothing under it, so every later lookup
+			// says no such export and cubecow leaves the status empty.
+			// Waiting cannot fix it — only exporting again can — so this
+			// is a terminal failure rather than an upload still in flight.
+			allDone = false
+			anyDead = true
+			messages = append(messages, fmt.Sprintf("%s export %s no longer exists", ref.Name, uuid))
+		case status == cow.ExportStatusInProgress, status == "":
+			// Empty without a uuid means cubecow has not reported yet.
 			allDone = false
 			anyProgress = true
-		case cow.ExportStatusNone:
+		case status == cow.ExportStatusNone:
 			allDone = false
 			anyNone = true
 		default:
@@ -220,6 +235,12 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 	}
 
 	switch {
+	case anyDead:
+		// Terminal: report it now so Master stops polling a package that
+		// can never become usable and surfaces it as failed instead of
+		// leaving it inprogress forever.
+		st.State = cow.RemoteStateFailed
+		st.Message = strings.Join(messages, "; ")
 	case allDone:
 		st.State = cow.RemoteStateReady
 		st.Message = "export_status DONE"

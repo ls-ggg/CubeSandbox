@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,8 +39,61 @@ func TestCleanupObjectsDispatchesByKind(t *testing.T) {
 		{Name: "tpl-1-build-rootfs", Kind: CowKindVolume, Role: "build_rootfs"},
 	})
 	require.NoError(t, err)
+	assert.Equal(t, []string{"tpl-1-rootfs", "tpl-1-memory", "tpl-1-build-rootfs"}, engine.deactivatedVolumes)
 	assert.Equal(t, []string{"tpl-1-rootfs"}, engine.deletedSnapshots)
 	assert.Equal(t, []string{"tpl-1-memory", "tpl-1-build-rootfs"}, engine.deletedVolumes)
+}
+
+func TestCleanupObjectsStopsWhenRootfsSurvives(t *testing.T) {
+	engine := &fakeCowEngine{
+		deleteErrByName: map[string]error{
+			"tpl-2-rootfs": errors.New("Device or resource busy"),
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	// Memory listed first on purpose: the sweep must reorder, not trust the
+	// caller, or a busy rootfs still loses its package.
+	err := CleanupObjectsFor(context.Background(), "s3", []CowObjectRef{
+		{Name: "tpl-2-memory", Kind: CowKindVolume, Role: "memory"},
+		{Name: "tpl-2-rootfs", Kind: CowKindSnapshot, Role: "rootfs"},
+		{Name: "s3-meta-tpl-2-snap", Kind: CowKindSnapshot, Role: "metadata"},
+	})
+	require.Error(t, err)
+	assert.Equal(t, []string{"tpl-2-rootfs"}, engine.deletedSnapshots)
+	assert.Empty(t, engine.deletedVolumes, "memory must survive a rootfs that refused to go")
+}
+
+func TestCleanupObjectsDeactivatesActivatedMemorySnap(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-x-memory-snap": {DevicePath: "/dev/mapper/tpl-x-memory-snap", SizeBytes: 64 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	err := CleanupObjectsFor(context.Background(), "s3", []CowObjectRef{
+		{Name: "tpl-x-memory-snap", Role: "memory"},
+	})
+	require.NoError(t, err)
+	require.Contains(t, engine.deactivatedVolumes, "tpl-x-memory-snap")
+	require.Contains(t, engine.deletedSnapshots, "tpl-x-memory-snap")
+	require.Empty(t, engine.volumeInfos["tpl-x-memory-snap"].DevicePath)
+}
+
+func TestAppendS3SealedPackageCleanupRefsAddsMemorySnap(t *testing.T) {
+	refs := AppendS3SealedPackageCleanupRefs("tpl-abc", []CowObjectRef{
+		{Name: "custom-rootfs", Kind: CowKindSnapshot, Role: "rootfs"},
+		{Name: "custom-mem", Kind: CowKindVolume, Role: "memory"},
+	})
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.Name)
+	}
+	assert.Contains(t, names, "custom-rootfs")
+	assert.Contains(t, names, "custom-mem")
+	assert.Contains(t, names, "tpl-tpl-abc-memory-snap")
+	assert.Contains(t, names, "s3-meta-tpl-abc-snap")
 }
 
 func TestInspectObjectsReportsExistingAndMissing(t *testing.T) {

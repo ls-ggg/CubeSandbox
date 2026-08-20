@@ -472,17 +472,21 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
-	// Always drop the on-disk package (S3 pause-snapshots/snapshots home)
-	// even when cubecow objects are already gone or still busy. Returning
-	// early on object cleanup leaked S3 pause-snapshot dirs after Resume.
+	// The on-disk package (S3 pause-snapshots/snapshots home) and its catalog
+	// are the only record of which cubecow objects are still out there, so
+	// they outlive a failed object sweep and a retry can pick up where this
+	// one stopped. Objects already gone count as cleaned, so a Resume that
+	// consumed the pause package still drops the dir here.
 	if storage.IsCowBackend() {
 		if err := storage.ReleaseS3MetadataVolume(ctx, backend, rsp.TemplateID); err != nil {
 			log.G(ctx).Warnf("CleanupTemplate %s: s3 metadata umount: %v", rsp.TemplateID, err)
 		}
 		if err := storage.CleanupObjectsFor(ctx, backend, refs); err != nil {
-			log.G(ctx).Warnf("CleanupTemplate %s: cubecow object cleanup: %v", rsp.TemplateID, err)
+			log.G(ctx).Warnf("CleanupTemplate %s: cubecow object cleanup, keeping package for retry: %v",
+				rsp.TemplateID, err)
 			rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
 			rsp.Ret.RetMsg = fmt.Sprintf("failed to cleanup cubecow objects: %v", err)
+			return rsp, nil
 		}
 	}
 	if err := storage.CleanupTemplateLocalData(ctx, rsp.TemplateID, snapshotPath); err != nil {
@@ -515,7 +519,7 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 		if err != nil {
 			return nil, "", err
 		}
-		return refs, ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
+		return finalizeCleanupRefs(backend, templateID, refs), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
 	}
 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, templateID)
 	if err != nil || entry == nil {
@@ -531,14 +535,22 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
 		if snapshotPath == "" {
 			snapshotPath = callerSnapshotPath
 		}
-		return refs, ensureSnapshotCleanupPath(ctx, backend, templateID, snapshotPath), nil
+		return finalizeCleanupRefs(backend, templateID, refs), ensureSnapshotCleanupPath(ctx, backend, templateID, snapshotPath), nil
 	}
 	if err != nil && !errors.Is(err, storage.ErrSnapshotCatalogNotFound) {
 		log.G(ctx).Warnf("CleanupTemplate %s: catalog lookup failed (%v); falling back to deterministic refs", templateID, err)
 	} else {
 		log.G(ctx).Warnf("CleanupTemplate %s: catalog miss; falling back to deterministic refs", templateID)
 	}
-	return storage.DefaultTemplateObjectRefs(templateID), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
+	return finalizeCleanupRefs(backend, templateID, storage.DefaultTemplateObjectRefs(templateID)), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
+}
+
+func finalizeCleanupRefs(backend, templateID string, refs []storage.CowObjectRef) []storage.CowObjectRef {
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil || normalized != cow.BackendS3 {
+		return refs
+	}
+	return storage.AppendS3SealedPackageCleanupRefs(templateID, refs)
 }
 
 func otherCowBackend(backend string) string {

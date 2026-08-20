@@ -54,6 +54,7 @@ type snapshotResource struct {
 	DisplayName               string                      `json:"display_name,omitempty"`
 	OriginSandboxID           string                      `json:"origin_sandbox_id,omitempty"`
 	OriginNodeID              string                      `json:"origin_node_id,omitempty"`
+	OriginNodeIP              string                      `json:"origin_node_ip,omitempty"`
 	StorageBackend            string                      `json:"storage_backend,omitempty"`
 	Backend                   string                      `json:"backend,omitempty"`
 	RemoteStatus              string                      `json:"remote_status,omitempty"`
@@ -177,6 +178,12 @@ var SnapshotListCommand = cli.Command{
 	Flags: []cli.Flag{
 		cli.BoolFlag{Name: "json", Usage: "print raw json response"},
 		cli.StringFlag{Name: "output,o", Usage: "output format, set to wide for more columns"},
+		cli.BoolFlag{Name: "s3", Usage: temporaryS3ListFlagUsage},
+		cli.IntFlag{
+			Name:  "cubelet-port",
+			Value: defaultCubeletGRPCPort,
+			Usage: "cubelet gRPC port used with --s3 (default 9999)",
+		},
 	},
 	Action: func(c *cli.Context) error {
 		rsp := &snapshotListResponse{}
@@ -192,22 +199,68 @@ var SnapshotListCommand = cli.Command{
 			return nil
 		}
 		wideOutput := strings.EqualFold(strings.TrimSpace(c.String("output")), "wide")
+		withS3 := c.Bool("s3")
+		deletableByID := map[string]string{}
+		if withS3 {
+			byNode := make(map[string][]rootfsDeletableQuery)
+			for _, item := range rsp.Data {
+				backend := firstNonEmptyCLI(item.Backend, item.StorageBackend)
+				if !shouldQueryRootfsDeletable(backend) {
+					continue
+				}
+				originIP := strings.TrimSpace(item.OriginNodeIP)
+				if originIP == "" {
+					originIP = firstReplicaNodeIP(item.Replicas)
+				}
+				if originIP == "" || strings.TrimSpace(item.SnapshotID) == "" {
+					continue
+				}
+				byNode[originIP] = append(byNode[originIP], rootfsDeletableQuery{
+					SnapshotID: item.SnapshotID,
+					Backend:    backend,
+				})
+			}
+			deletableByID = queryRootfsDeletableByNodes(c.Int("cubelet-port"), byNode)
+		}
 		w := tabwriter.NewWriter(os.Stdout, 4, 8, 4, ' ', 0)
 		header := "SNAPSHOT_ID\tSTATUS\tSANDBOX_ID\tNODE_ID\tBACKEND\tREMOTE_STATUS\tCREATED_AT"
 		if wideOutput {
 			header = "SNAPSHOT_ID\tSTATUS\tDISPLAY_NAME\tSANDBOX_ID\tNODE_ID\tRUNTIME_REFS\tBACKEND\tREMOTE_STATUS\tLAST_ERROR"
 		}
+		if withS3 {
+			header += "\tORIGIN_IP\tDELETABLE"
+		}
 		fmt.Fprintln(w, header)
 		for _, item := range rsp.Data {
 			originNode := item.OriginNodeID
 			backend := firstNonEmptyCLI(item.Backend, item.StorageBackend)
+			var row string
 			if wideOutput {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+				row = fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s",
 					item.SnapshotID, item.Status, item.DisplayName, item.OriginSandboxID, originNode, item.RuntimeRefCount, backend, item.RemoteStatus, item.LastError)
-				continue
+			} else {
+				row = fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s",
+					item.SnapshotID, item.Status, item.OriginSandboxID, originNode, backend, item.RemoteStatus, item.CreatedAt)
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				item.SnapshotID, item.Status, item.OriginSandboxID, originNode, backend, item.RemoteStatus, item.CreatedAt)
+			if withS3 {
+				originIP := strings.TrimSpace(item.OriginNodeIP)
+				if originIP == "" {
+					originIP = firstReplicaNodeIP(item.Replicas)
+				}
+				deletable := "-"
+				if shouldQueryRootfsDeletable(backend) && originIP != "" {
+					if v, ok := deletableByID[item.SnapshotID]; ok {
+						deletable = v
+					} else {
+						deletable = rootfsDeletableUnknown
+					}
+				}
+				if originIP == "" {
+					originIP = "-"
+				}
+				row += fmt.Sprintf("\t%s\t%s", originIP, deletable)
+			}
+			fmt.Fprintln(w, row)
 		}
 		return w.Flush()
 	},

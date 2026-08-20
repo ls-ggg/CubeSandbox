@@ -48,36 +48,58 @@ func (s *service) Register(server *grpc.Server) error {
 }
 
 func (s *service) Status(ctx context.Context, req *api.StatusRequest) (*api.StatusResponse, error) {
-	backend, err := normalizeStatusBackend(req.GetBackend())
+	return s.statusOne(ctx, req.GetRequestId(), req.GetSnapshotId(), req.GetBackend()), nil
+}
+
+func (s *service) BatchStatus(ctx context.Context, req *api.BatchStatusRequest) (*api.BatchStatusResponse, error) {
+	items := req.GetItems()
+	rsp := &api.BatchStatusResponse{
+		RequestId: req.GetRequestId(),
+		Items:     make([]*api.StatusResponse, 0, len(items)),
+	}
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		rsp.Items = append(rsp.Items, s.statusOne(ctx, req.GetRequestId(), item.GetSnapshotId(), item.GetBackend()))
+	}
+	return rsp, nil
+}
+
+func (s *service) statusOne(ctx context.Context, requestID, snapshotID, rawBackend string) *api.StatusResponse {
+	backend, err := normalizeStatusBackend(rawBackend)
 	if err != nil {
 		return &api.StatusResponse{
-			RequestId:  req.GetRequestId(),
-			SnapshotId: req.GetSnapshotId(),
-			Backend:    strings.TrimSpace(req.GetBackend()),
+			RequestId:  requestID,
+			SnapshotId: snapshotID,
+			Backend:    strings.TrimSpace(rawBackend),
 			State:      cow.RemoteStateFailed,
 			Message:    err.Error(),
-		}, nil
+		}
 	}
 	rsp := &api.StatusResponse{
-		RequestId:  req.GetRequestId(),
-		SnapshotId: req.GetSnapshotId(),
+		RequestId:  requestID,
+		SnapshotId: snapshotID,
 		Backend:    backend,
 		State:      cow.RemoteStatePending,
 	}
 	if backend != cow.BackendS3 {
 		rsp.Message = "xfs has no remote upload"
-		return rsp, nil
+		return rsp
 	}
 
-	st, err := storage.SnapshotUploadStatus(ctx, backend, req.GetSnapshotId())
+	st, err := storage.SnapshotUploadStatus(ctx, backend, snapshotID)
 	if err != nil {
 		rsp.State = cow.RemoteStateFailed
 		rsp.Message = err.Error()
-		return rsp, nil
+		return rsp
 	}
 	if st == nil {
 		rsp.Message = "empty upload status"
-		return rsp, nil
+		return rsp
 	}
 	rsp.State = strings.TrimSpace(st.State)
 	if rsp.State == "" {
@@ -88,7 +110,14 @@ func (s *service) Status(ctx context.Context, req *api.StatusRequest) (*api.Stat
 		rsp.Message = st.RemoteUUIDs.JSON()
 	}
 	rsp.RemoteReady = rsp.State == cow.RemoteStateReady
-	return rsp, nil
+	if st.RootfsDeletable != nil {
+		if *st.RootfsDeletable {
+			rsp.RootfsDeletable = "true"
+		} else {
+			rsp.RootfsDeletable = "false"
+		}
+	}
+	return rsp
 }
 
 func normalizeStatusBackend(raw string) (string, error) {

@@ -163,8 +163,9 @@ func EnsureS3MetadataReady(ctx context.Context) error {
 }
 
 // EnsureS3MetadataBase creates the 8MiB base volume and mkfs.ext4's it on
-// first use. If cubecow still has the volume after Cubelet / machine restart,
-// it is reused and not formatted again. Missing volumes are recreated.
+// first use, then snapshots it and deactivates the volume (no further host
+// IO). Restart of an older Cubelet that left the base activated is reconciled
+// on this path. Missing volumes are recreated.
 func EnsureS3MetadataBase(ctx context.Context) error {
 	store, err := requireS3Cow()
 	if err != nil {
@@ -208,6 +209,13 @@ func EnsureS3MetadataBase(ctx context.Context) error {
 		if err := saveS3MetadataState(state); err != nil {
 			return err
 		}
+		// Idempotent: leftover activate from older Cubelets is torn down here.
+		if err := deactivateS3Object(ctx, store, name, cowKindVolume); err != nil {
+			CubeLog.Warnf("deactivate s3 metadata base %s: %v", name, err)
+		}
+		if err := deactivateS3Object(ctx, store, state.Base.SnapshotName, cowKindSnapshot); err != nil {
+			CubeLog.Warnf("deactivate s3 metadata base snap %s: %v", state.Base.SnapshotName, err)
+		}
 		CubeLog.Infof("s3 metadata base %s already present; skip mkfs", name)
 		return nil
 	}
@@ -237,6 +245,12 @@ func EnsureS3MetadataBase(ctx context.Context) error {
 	}
 	if err := saveS3MetadataState(state); err != nil {
 		return err
+	}
+	if err := deactivateS3Object(ctx, store, name, cowKindVolume); err != nil {
+		CubeLog.Warnf("deactivate s3 metadata base %s: %v", name, err)
+	}
+	if err := deactivateS3Object(ctx, store, state.Base.SnapshotName, cowKindSnapshot); err != nil {
+		CubeLog.Warnf("deactivate s3 metadata base snap %s: %v", state.Base.SnapshotName, err)
 	}
 	CubeLog.Infof("s3 metadata base %s ready size=%d formatted=%v created=%v snap=%s", name, s3MetadataBaseSizeBytes, true, created, state.Base.SnapshotName)
 	return nil
@@ -565,12 +579,25 @@ func RemountS3MetadataVolumes(ctx context.Context) error {
 			return
 		}
 		seen[id] = struct{}{}
+		if s3MetadataPackageSealed(id) {
+			// Already-active leftovers from older Cubelets must be deactivated
+			// here. Do not ensureS3MetadataRWVolumeLocked first — that clones
+			// a new work volume from the snap and activates it again.
+			if err := deactivateSealedS3PackageLeftoversLocked(ctx, store, id); err != nil {
+				remountErr = errors.Join(remountErr, err)
+			}
+			return
+		}
 		name, err := store.ensureS3MetadataRWVolumeLocked(ctx, id)
 		if err != nil {
 			remountErr = errors.Join(remountErr, err)
 			return
 		}
 		if name == "" || IsS3MetadataBaseName(name) {
+			return
+		}
+		if strings.HasSuffix(name, "-snap") {
+			// Never activate／mount the sealed package snap for metadata IO.
 			return
 		}
 		if strings.TrimSpace(mountPath) == "" {
@@ -625,7 +652,45 @@ func RemountS3MetadataVolumes(ctx context.Context) error {
 		}
 		mountOne(id, strings.TrimSpace(entry.MetaDir))
 	}
+	// After Finalize, catalog.json lives on the unmounted metadata volume, so
+	// ListLocalSnapshotsFor and Derived are both empty. Host package dirs
+	// remain; deactivate leftover NVMe activates for those IDs.
+	for _, id := range listS3PackageIDsOnDisk() {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if err := deactivateSealedS3PackageLeftoversLocked(ctx, store, id); err != nil {
+			remountErr = errors.Join(remountErr, err)
+		}
+	}
 	return remountErr
+}
+
+func listS3PackageIDsOnDisk() []string {
+	seen := map[string]struct{}{}
+	var ids []string
+	for _, root := range catalogKindRoots(cow.BackendS3) {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			id := strings.TrimSpace(e.Name())
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func s3MetadataGuessMountPathLocked(snapshotID string) string {
@@ -773,6 +838,106 @@ func persistDerivedLocked(snapshotID, volName, mountPath string) error {
 		MountPath:  filepath.Clean(mountPath),
 	}
 	return saveS3MetadataState(state)
+}
+
+func dropDerived(snapshotID string) error {
+	s3MetadataMu.Lock()
+	defer s3MetadataMu.Unlock()
+	return dropDerivedLocked(snapshotID)
+}
+
+func dropDerivedLocked(snapshotID string) error {
+	id := strings.TrimSpace(snapshotID)
+	if id == "" {
+		return nil
+	}
+	state, err := loadS3MetadataState()
+	if err != nil {
+		return err
+	}
+	if state.Derived == nil {
+		return nil
+	}
+	delete(state.Derived, id)
+	return saveS3MetadataState(state)
+}
+
+// s3MetadataPackageSealed reports a template／pause／app-snapshot package
+// whose metadata has been sealed to a RO snap. Those packages have no
+// further host mkfs／mount IO until a child clones a new RW volume.
+func s3MetadataPackageSealed(snapshotID string) bool {
+	entry, err := GetLocalSnapshotFor(context.Background(), cow.BackendS3, strings.TrimSpace(snapshotID))
+	if err != nil || entry == nil {
+		return false
+	}
+	kind := strings.TrimSpace(entry.MetadataKind)
+	vol := strings.TrimSpace(entry.MetadataVol)
+	return kind == cowKindSnapshot || strings.HasSuffix(vol, "-snap")
+}
+
+func deactivateSealedS3PackageLeftoversLocked(ctx context.Context, store cow.Store, id string) error {
+	id = strings.TrimSpace(id)
+	if store == nil || id == "" {
+		return nil
+	}
+	entry, _ := GetLocalSnapshotFor(ctx, cow.BackendS3, id)
+	var err error
+	if entry != nil {
+		if p := strings.TrimSpace(entry.MetaDir); p != "" {
+			err = errors.Join(err, unmountS3MetadataPathIfMounted(p))
+		}
+		if home := strings.TrimSpace(entry.SnapshotPath); home != "" {
+			err = errors.Join(err, unmountS3MetadataPathIfMounted(filepath.Join(home, SnapshotMetadataDir)))
+		}
+	}
+	for _, kind := range []string{SnapshotKindNormal, SnapshotKindPause} {
+		if home := SnapshotHome(cow.BackendS3, kind, id); home != "" {
+			err = errors.Join(err, unmountS3MetadataPathIfMounted(filepath.Join(home, SnapshotMetadataDir)))
+		}
+	}
+	err = errors.Join(err, dropDerivedLocked(id))
+	// Always deactivate: cubecow may report an empty device_path while
+	// s3lvol still has the NVMe bdev from a previous Cubelet.
+	err = errors.Join(err, deactivateS3Object(ctx, store, S3MetadataVolumeName(id), cowKindVolume))
+	err = errors.Join(err, deactivateS3Object(ctx, store, S3MetadataSnapshotName(id), cowKindSnapshot))
+	// Guessed names: catalog.json is on the unmounted metadata volume after
+	// Finalize, so MemoryVol／MetadataVol may be unknown at remount.
+	if memWork := cowTemplateMemoryName(id); memWork != "" {
+		err = errors.Join(err, deactivateS3Object(ctx, store, memWork, cowKindVolume))
+		err = errors.Join(err, deactivateS3Object(ctx, store, memWork+"-snap", cowKindSnapshot))
+	}
+	if entry == nil {
+		return err
+	}
+	if meta := strings.TrimSpace(entry.MetadataVol); meta != "" && !IsS3MetadataBaseName(meta) {
+		kind := strings.TrimSpace(entry.MetadataKind)
+		if kind == "" {
+			kind = cowKindSnapshot
+		}
+		err = errors.Join(err, deactivateS3Object(ctx, store, meta, kind))
+	}
+	if mem := strings.TrimSpace(entry.MemoryVol); mem != "" {
+		kind := strings.TrimSpace(entry.MemoryKind)
+		if kind == cowKindSnapshot || strings.HasSuffix(mem, "-snap") {
+			if kind == "" {
+				kind = cowKindSnapshot
+			}
+			err = errors.Join(err, deactivateS3Object(ctx, store, mem, kind))
+		}
+	}
+	return err
+}
+
+func deactivateS3Object(ctx context.Context, store cow.Store, name, kind string) error {
+	name = strings.TrimSpace(name)
+	if store == nil || name == "" {
+		return nil
+	}
+	err := store.DeactivateByKind(ctx, name, kind)
+	if err == nil || isCowSemantic(err, cubecow.SemNotFound) {
+		return nil
+	}
+	return err
 }
 
 func loadS3MetadataState() (*s3MetadataState, error) {

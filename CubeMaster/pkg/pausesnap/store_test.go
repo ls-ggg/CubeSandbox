@@ -40,12 +40,13 @@ func TestGenerateSnapshotIDFormat(t *testing.T) {
 	require.Equal(t, snapshotIDPrefix, id[:len(snapshotIDPrefix)])
 }
 
-func TestIsReadyPauseSnapshot(t *testing.T) {
+func TestIsShimGonePauseSnapshot(t *testing.T) {
 	t.Parallel()
 
-	require.True(t, isReadyPauseSnapshot("READY"))
-	require.True(t, isReadyPauseSnapshot(" ready "))
-	require.False(t, isReadyPauseSnapshot(statusFailed))
-	require.False(t, isReadyPauseSnapshot(statusCreating))
-	require.False(t, isReadyPauseSnapshot(""))
+	require.True(t, isShimGonePauseSnapshot("READY"))
+	require.True(t, isShimGonePauseSnapshot(" ready "))
+	require.True(t, isShimGonePauseSnapshot(statusDeleteFailed))
+	require.False(t, isShimGonePauseSnapshot(statusFailed))
+	require.False(t, isShimGonePauseSnapshot(statusCreating))
+	require.False(t, isShimGonePauseSnapshot(""))
 }

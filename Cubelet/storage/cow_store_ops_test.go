@@ -127,6 +127,21 @@ func TestActivateSnapshotActivatesLocalObjects(t *testing.T) {
 	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.activatedVolumes)
 }
 
+func TestActivateSnapshotSkipsMetadataSnap(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs":              {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory":              {SizeBytes: 64 << 20},
+			S3MetadataSnapshotName("snap-1"): {SizeBytes: 8 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	require.NoError(t, ActivateSnapshot(context.Background(), cow.BackendS3, "snap-1"))
+	require.Equal(t, []string{"tpl-snap-1-rootfs", "tpl-snap-1-memory"}, engine.activatedVolumes)
+	require.NotContains(t, engine.activatedVolumes, S3MetadataSnapshotName("snap-1"))
+}
+
 func TestActivateSnapshotFailsWhenMissing(t *testing.T) {
 	useTestCowStorage(t, &fakeCowEngine{})
 

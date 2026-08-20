@@ -947,16 +947,9 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
 		return "", nil
 	}
 	annotations := opts.ReqInfo.GetAnnotations()
-	if existingURL := strings.TrimSpace(annotations[constants.AnnotationVMSnapshotMemoryVolURL]); existingURL != "" {
-		return existingURL, nil
-	}
-	// v4: cubelet is the sole physical authority for snapshot/template memory
-	// volumes. Master passes only logical ids in annotations; we resolve the
-	// vol name + kind from the local snapshot catalog. Master-supplied vol
-	// annotations (MasterAnnotation{App,Runtime}SnapshotMemoryVol/Kind) are no
-	// longer trusted - they may be stale or empty after the master-thin
-	// refactor. fail-fast on catalog miss so create-from-snapshot does not
-	// silently degrade to a cold start.
+	// Do not trust AnnotationVMSnapshotMemoryVolURL: it may be a stale
+	// file:///dev/nvmeXn1 from a previous activate on this or another node.
+	// Always resolve the catalog vol name and Activate for the live path.
 	backend := createContextStorageBackend(opts)
 	volumeName, volumeKind, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, backend, annotations)
 	if err != nil {
@@ -1248,7 +1241,11 @@ func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.Creat
 		return nil, err
 	}
 	uuids := remoteUUIDsFromCreateContext(opts)
-	fetchedRemote := !uuids.Empty() && backend == cow.BackendS3
+	// Master sends remote_uuids on every S3 restore, same-node included, so
+	// they say where the package can be fetched from — not that this node had
+	// to. Only a restore Master placed off the package's node runs on an
+	// import, and only an import is a RW volume that can be used in place.
+	fetchedRemote := !uuids.Empty() && backend == cow.BackendS3 && crossNodeRestoreFromCreateContext(opts)
 	if fetchedRemote {
 		// import_lvol yields RW volumes ready for Resume／create; use in place.
 		if err := FetchSnapshot(ctx, backend, templateID, uuids, true); err != nil {
@@ -1272,6 +1269,16 @@ func remoteUUIDsFromCreateContext(opts *workflow.CreateContext) *cow.RemoteUUIDs
 	}
 	raw := strings.TrimSpace(opts.ReqInfo.GetAnnotations()[constants.MasterAnnotationSnapshotRemoteUUIDs])
 	return cow.ParseRemoteUUIDs(raw)
+}
+
+// crossNodeRestoreFromCreateContext reports Master's verdict that it placed
+// this restore on a node holding no replica of the package.
+func crossNodeRestoreFromCreateContext(opts *workflow.CreateContext) bool {
+	if opts == nil || opts.ReqInfo == nil {
+		return false
+	}
+	raw := opts.ReqInfo.GetAnnotations()[constants.MasterAnnotationSnapshotCrossNode]
+	return strings.EqualFold(strings.TrimSpace(raw), "true")
 }
 
 func attachExistingSnapshotRootfs(ctx context.Context, store cow.Store, backend, snapshotID string) (*cowVolume, error) {

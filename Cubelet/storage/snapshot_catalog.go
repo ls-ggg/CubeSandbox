@@ -315,7 +315,15 @@ func GetLocalSnapshotFor(ctx context.Context, backend, snapshotID string) (*Snap
 	snapshotCatalogMu.RUnlock()
 	entry, err := findSnapshotCatalogOnDisk(key, snapshotID)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, ErrSnapshotCatalogNotFound) || !isS3CatalogBackend(key) {
+			return nil, err
+		}
+		// A sealed S3 package keeps catalog.json on its unmounted metadata
+		// disk, so the miss says nothing about whether the package is here.
+		// Rebuild what the object names prove and do not cache it: the real
+		// catalog carries spec_dir／component_versions and must win once it
+		// is readable again.
+		return deriveS3CatalogEntry(ctx, snapshotID)
 	}
 	snapshotCatalogMu.Lock()
 	catalogNSLocked(key).index[snapshotID] = cloneCatalogEntry(entry)

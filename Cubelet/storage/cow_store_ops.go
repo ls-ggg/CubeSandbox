@@ -323,27 +323,69 @@ func CleanupObjects(ctx context.Context, refs []CowObjectRef) error {
 }
 
 // CleanupObjectsFor is [CleanupObjects] on the Store selected by backend.
+//
+// The rootfs object goes first and a failure on it stops the sweep. rootfs is
+// what proves the package exists — every other object name can be re-derived
+// from the package id, but only while the package is still whole. Deleting
+// memory and metadata under a rootfs that refused to go (an exported snapshot
+// stays undeletable until its export is released) turns a retryable failure
+// into a half package that no retry can repair.
 func CleanupObjectsFor(ctx context.Context, backend string, refs []CowObjectRef) error {
 	store, err := requireCowStoreFor(backend)
 	if err != nil {
 		return err
 	}
 	var cleanupErr error
-	for _, ref := range refs {
-		if strings.TrimSpace(ref.Name) == "" {
+	for _, ref := range orderCleanupRefsRootfsFirst(refs) {
+		name := strings.TrimSpace(ref.Name)
+		if name == "" {
 			continue
 		}
-		kind, err := normalizeCowKindForRole(ref.Kind, ref.Role)
+		kind, err := normalizeCowKindForCleanup(ref.Kind, ref.Role, name)
 		if err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup cubecow object %q: %w", ref.Name, err))
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup cubecow object %q: %w", name, err))
 			continue
 		}
-		if err := store.DeleteByKind(ctx, ref.Name, kind); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup cubecow object %q: %w", ref.Name, err))
+		// Tear down NVMe/host activation first so an in-use memory-snap
+		// can be deleted. Deactivate failure is not fatal: cubecow
+		// delete_snapshot also deactivates, and NotFound is success.
+		_ = store.DeactivateByKind(ctx, name, kind)
+		if err := store.DeleteByKind(ctx, name, kind); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup cubecow object %q: %w", name, err))
+			if isRootfsCleanupRole(ref.Role) {
+				return cleanupErr
+			}
 			continue
 		}
 	}
 	return cleanupErr
+}
+
+// orderCleanupRefsRootfsFirst hoists rootfs refs to the front, leaving the
+// relative order of everything else untouched.
+func orderCleanupRefsRootfsFirst(refs []CowObjectRef) []CowObjectRef {
+	ordered := make([]CowObjectRef, 0, len(refs))
+	for _, ref := range refs {
+		if isRootfsCleanupRole(ref.Role) {
+			ordered = append(ordered, ref)
+		}
+	}
+	if len(ordered) == 0 || len(ordered) == len(refs) {
+		return refs
+	}
+	for _, ref := range refs {
+		if !isRootfsCleanupRole(ref.Role) {
+			ordered = append(ordered, ref)
+		}
+	}
+	return ordered
+}
+
+// isRootfsCleanupRole matches the package rootfs only. build_rootfs is a
+// template build leftover, not the package identity, so it does not gate the
+// rest of the sweep.
+func isRootfsCleanupRole(role string) bool {
+	return strings.EqualFold(strings.TrimSpace(role), "rootfs")
 }
 
 // InspectObjects reports existence/device path for CoW object refs on the default Store.

@@ -388,6 +388,12 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 			cubeletReq.Annotations[constants.CubeAnnotationSnapshotRemoteUUIDs] = raw
 		}
 	}
+	if placement != nil && placement.CrossNode {
+		// Only Master knows the target holds no replica. Saying so lets
+		// Cubelet import the package up front instead of inferring it from a
+		// catalog miss, and lets it reject a restore it cannot serve.
+		cubeletReq.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+	}
 	fillResumeRecreateFields(ctx, req.SandboxID, cubeletReq, createReq)
 
 	calleeEndpoint := cubelet.GetCubeletAddr(targetIP)

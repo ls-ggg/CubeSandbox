@@ -119,9 +119,44 @@ func TestResolveCleanupRefsFindsS3CatalogWhenXFSMisses(t *testing.T) {
 
 	refs, snapPath, err := resolveCleanupRefs(context.Background(), "xfs", templateID, nil, "")
 	require.NoError(t, err)
-	require.Len(t, refs, 2)
-	assert.Equal(t, "s3-rootfs", refs[0].Name)
 	assert.Equal(t, snapDir, snapPath)
+	names := cleanupRefNames(refs)
+	assert.Contains(t, names, "s3-rootfs")
+	assert.Contains(t, names, "s3-mem")
+	assert.Contains(t, names, "tpl-"+templateID+"-memory-snap")
+	assert.Contains(t, names, "s3-meta-"+templateID+"-snap")
+}
+
+func TestResolveCleanupRefsS3CatalogIncludesMemorySnap(t *testing.T) {
+	templateID := "tpl-s3-mem-snap"
+	snapDir := filepath.Join(t.TempDir(), "s3", templateID)
+	require.NoError(t, storage.WriteSnapshotCatalogFor("s3", &storage.SnapshotCatalogEntry{
+		SnapshotID:   templateID,
+		SnapshotPath: snapDir,
+		RootfsVol:    "s3-rootfs",
+		MemoryVol:    "s3-mem",
+		MemoryKind:   storage.CowKindVolume,
+		Kind:         storage.CatalogKindTemplate,
+		Backend:      "s3",
+	}))
+	t.Cleanup(func() { storage.DeleteSnapshotCatalogFor("s3", templateID) })
+
+	refs, _, err := resolveCleanupRefs(context.Background(), "s3", templateID, nil, "")
+	require.NoError(t, err)
+	names := cleanupRefNames(refs)
+	assert.Contains(t, names, "s3-rootfs")
+	assert.Contains(t, names, "s3-mem")
+	assert.Contains(t, names, "tpl-"+templateID+"-memory-snap")
+	assert.Contains(t, names, "s3-meta-"+templateID)
+	assert.Contains(t, names, "s3-meta-"+templateID+"-snap")
+}
+
+func cleanupRefNames(refs []storage.CowObjectRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, ref.Name)
+	}
+	return out
 }
 
 func TestResolveCleanupRefsCatalogWithoutBuildRootfsStillCleansFromCatalog(t *testing.T) {

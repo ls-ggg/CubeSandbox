@@ -16,9 +16,15 @@ import (
 )
 
 // FinalizeS3PackageSnapshots is a Pause／Commit／AppSnapshot packaging step:
-// seal RW memory／metadata work volumes into RO snapshots, rewrite the local
-// catalog, umount the package metadata mount, and delete the work volumes
+// flush＋umount the package metadata mount, seal RW memory／metadata work
+// volumes into RO snapshots, deactivate the sealed snaps (no host IO until a
+// later restore ResolveDevPath／clone), and delete the work volumes
 // (snapshots remain; volumes follow the sandbox／build lifecycle).
+//
+// Metadata must be umounted before seal: CreateSnapshotFromVolume captures the
+// block device as-is, and a live mount can leave metadata.json／catalog.json in
+// the page cache so the sealed snap is missing them (shim then fails restore).
+// Catalog is rewritten to snap names while still mounted, then umount flushes.
 // Rootfs is already a snapshot from CommitTemplateRootfs. XFS is a no-op.
 func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string) error {
 	normalized, err := cow.NormalizeBackend(backend)
@@ -48,47 +54,27 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 		metaWork = S3MetadataVolumeName(id)
 	}
 
+	// Point catalog at the post-seal snap names while MetaDir is still mounted
+	// so metadata.json／catalog.json land on the volume before umount＋seal.
 	changed := false
-	if memoryWork != "" {
-		snap, sealed, sealErr := s3store.sealVolumeToSnapshot(ctx, memoryWork)
-		if sealErr != nil {
-			return fmt.Errorf("seal memory %s: %w", memoryWork, sealErr)
-		}
-		if sealed {
-			entry.MemoryVol = snap
-			entry.MemoryKind = cowKindSnapshot
-			changed = true
-		} else if strings.TrimSpace(entry.MemoryKind) != cowKindSnapshot {
-			entry.MemoryKind = cowKindSnapshot
-			changed = true
-		}
+	if memoryWork != "" && !strings.HasSuffix(memoryWork, "-snap") {
+		entry.MemoryVol = memoryWork + "-snap"
+		entry.MemoryKind = cowKindSnapshot
+		changed = true
+	} else if memoryWork != "" && strings.TrimSpace(entry.MemoryKind) != cowKindSnapshot {
+		entry.MemoryKind = cowKindSnapshot
+		changed = true
 	}
+	desiredMetaSnap := ""
 	if metaWork != "" && !IsS3MetadataBaseName(metaWork) {
-		desiredSnap := S3MetadataSnapshotName(id)
+		desiredMetaSnap = S3MetadataSnapshotName(id)
 		if strings.HasSuffix(metaWork, "-snap") {
-			desiredSnap = metaWork
+			desiredMetaSnap = metaWork
 		}
-		info, infoErr := s3store.GetVolumeInfo(ctx, metaWork)
-		exists, existsErr := cowObjectPresent(info, infoErr)
-		if existsErr != nil {
-			return existsErr
-		}
-		if exists {
-			snap, sealed, sealErr := s3store.sealVolumeToSnapshotAs(ctx, metaWork, desiredSnap)
-			if sealErr != nil {
-				return fmt.Errorf("seal metadata %s: %w", metaWork, sealErr)
-			}
-			if sealed || strings.TrimSpace(entry.MetadataVol) != snap || strings.TrimSpace(entry.MetadataKind) != cowKindSnapshot {
-				entry.MetadataVol = snap
-				entry.MetadataKind = cowKindSnapshot
-				changed = true
-			}
-		} else if snapInfo, snapErr := s3store.GetVolumeInfo(ctx, desiredSnap); snapErr == nil && snapInfo != nil {
-			if strings.TrimSpace(entry.MetadataVol) != desiredSnap || strings.TrimSpace(entry.MetadataKind) != cowKindSnapshot {
-				entry.MetadataVol = desiredSnap
-				entry.MetadataKind = cowKindSnapshot
-				changed = true
-			}
+		if strings.TrimSpace(entry.MetadataVol) != desiredMetaSnap || strings.TrimSpace(entry.MetadataKind) != cowKindSnapshot {
+			entry.MetadataVol = desiredMetaSnap
+			entry.MetadataKind = cowKindSnapshot
+			changed = true
 		}
 	}
 	if changed {
@@ -97,7 +83,6 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 		}
 	}
 
-	// Drop the package mount and delete RW work volumes; keep sealed snaps.
 	metaDir := strings.TrimSpace(entry.MetaDir)
 	if metaDir == "" {
 		if home := strings.TrimSpace(entry.SnapshotPath); home != "" {
@@ -106,23 +91,75 @@ func FinalizeS3PackageSnapshots(ctx context.Context, backend, snapshotID string)
 			metaDir = SnapshotMetaDir(cow.BackendS3, SnapshotKindNormal, id)
 		}
 	}
-	_ = UnmountS3Metadata(metaDir)
+	if err := UnmountS3Metadata(metaDir); err != nil {
+		return fmt.Errorf("umount s3 metadata before seal %s: %w", metaDir, err)
+	}
 	if pauseHome := SnapshotHome(cow.BackendS3, SnapshotKindPause, id); pauseHome != "" {
 		_ = UnmountS3Metadata(filepath.Join(pauseHome, SnapshotMetadataDir))
+	}
+
+	if memoryWork != "" {
+		snap, _, sealErr := s3store.sealVolumeToSnapshot(ctx, memoryWork)
+		if sealErr != nil {
+			return fmt.Errorf("seal memory %s: %w", memoryWork, sealErr)
+		}
+		if snap != "" {
+			entry.MemoryVol = snap
+			entry.MemoryKind = cowKindSnapshot
+		}
+	}
+	if metaWork != "" && !IsS3MetadataBaseName(metaWork) && desiredMetaSnap != "" {
+		info, infoErr := s3store.GetVolumeInfo(ctx, metaWork)
+		exists, existsErr := cowObjectPresent(info, infoErr)
+		if existsErr != nil {
+			return existsErr
+		}
+		if exists {
+			snap, _, sealErr := s3store.sealVolumeToSnapshotAs(ctx, metaWork, desiredMetaSnap)
+			if sealErr != nil {
+				return fmt.Errorf("seal metadata %s: %w", metaWork, sealErr)
+			}
+			if snap != "" {
+				entry.MetadataVol = snap
+				entry.MetadataKind = cowKindSnapshot
+			}
+		} else if snapInfo, snapErr := s3store.GetVolumeInfo(ctx, desiredMetaSnap); snapErr == nil && snapInfo != nil {
+			entry.MetadataVol = desiredMetaSnap
+			entry.MetadataKind = cowKindSnapshot
+		}
 	}
 
 	var cleanupErr error
 	memorySnap := strings.TrimSpace(entry.MemoryVol)
 	if memoryWork != "" && memoryWork != memorySnap && !strings.HasSuffix(memoryWork, "-snap") {
+		if err := deactivateS3Object(ctx, s3store, memoryWork, cowKindVolume); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("deactivate memory work %s: %w", memoryWork, err))
+		}
 		if err := s3store.DeleteByKind(ctx, memoryWork, cowKindVolume); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete memory work %s: %w", memoryWork, err))
 		}
 	}
+	if memorySnap != "" && strings.HasSuffix(memorySnap, "-snap") {
+		if err := deactivateS3Object(ctx, s3store, memorySnap, cowKindSnapshot); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("deactivate memory snap %s: %w", memorySnap, err))
+		}
+	}
 	metaSnap := strings.TrimSpace(entry.MetadataVol)
 	if metaWork != "" && metaWork != metaSnap && !IsS3MetadataBaseName(metaWork) && !strings.HasSuffix(metaWork, "-snap") {
+		if err := deactivateS3Object(ctx, s3store, metaWork, cowKindVolume); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("deactivate metadata work %s: %w", metaWork, err))
+		}
 		if err := s3store.DeleteByKind(ctx, metaWork, cowKindVolume); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete metadata work %s: %w", metaWork, err))
 		}
+	}
+	if metaSnap != "" && !IsS3MetadataBaseName(metaSnap) {
+		if err := deactivateS3Object(ctx, s3store, metaSnap, cowKindSnapshot); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("deactivate metadata snap %s: %w", metaSnap, err))
+		}
+	}
+	if err := dropDerived(id); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("drop s3 metadata derived %s: %w", id, err))
 	}
 	return cleanupErr
 }

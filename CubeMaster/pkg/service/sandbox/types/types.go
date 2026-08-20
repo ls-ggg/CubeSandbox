@@ -560,20 +560,29 @@ type ListCubeSandboxRes struct {
 }
 
 type SandboxBriefData struct {
-	SandboxID    string             `json:"sandbox_id,omitempty"`
-	Status       int32              `json:"status,omitempty"`
-	HostID       string             `json:"host_id,omitempty"`
-	HostIP       string             `json:"host_ip,omitempty"`
-	TemplateID   string             `json:"template_id,omitempty"`
-	CpuCount     int32              `json:"cpu_count,omitempty"`
-	MemoryMB     int32              `json:"memory_mb,omitempty"`
-	Annotations  map[string]string  `json:"annotations,omitempty"`
-	Labels       map[string]string  `json:"labels,omitempty"`
-	NameSpace    string             `json:"namespace,omitempty"`
-	CreateAt     int64              `json:"create_at,omitempty"`
-	PauseAt      int64              `json:"pause_at,omitempty"`
-	EndAt        int64              `json:"end_at,omitempty"`
-	VolumeMounts []*VolumeMountInfo `json:"volume_mounts,omitempty"`
+	SandboxID  string `json:"sandbox_id,omitempty"`
+	Status     int32  `json:"status,omitempty"`
+	HostID     string `json:"host_id,omitempty"`
+	HostIP     string `json:"host_ip,omitempty"`
+	TemplateID string `json:"template_id,omitempty"`
+	Backend    string `json:"backend,omitempty"`
+	// PauseSnapshotID / RemoteStatus / PauseStatus come from the Master pause
+	// binding, not from the node. RemoteStatus is the S3 upload state of the
+	// pause snapshot (empty on xfs); cross-node Resume needs "ready".
+	// PauseStatus is only worth showing when it is not READY, e.g.
+	// DELETE_FAILED for a package the node could not sweep.
+	PauseSnapshotID string             `json:"pause_snapshot_id,omitempty"`
+	RemoteStatus    string             `json:"remote_status,omitempty"`
+	PauseStatus     string             `json:"pause_status,omitempty"`
+	CpuCount        int32              `json:"cpu_count,omitempty"`
+	MemoryMB        int32              `json:"memory_mb,omitempty"`
+	Annotations     map[string]string  `json:"annotations,omitempty"`
+	Labels          map[string]string  `json:"labels,omitempty"`
+	NameSpace       string             `json:"namespace,omitempty"`
+	CreateAt        int64              `json:"create_at,omitempty"`
+	PauseAt         int64              `json:"pause_at,omitempty"`
+	EndAt           int64              `json:"end_at,omitempty"`
+	VolumeMounts    []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 }
 
 type GetCubeSandboxReq struct {

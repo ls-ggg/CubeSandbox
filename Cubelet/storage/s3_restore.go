@@ -49,10 +49,13 @@ func activateStoreObjects(ctx context.Context, store cow.Store, backend, snapsho
 			}
 			return fmt.Errorf("%w: snapshot %s object %s", ErrCowObjectMissing, id, ref.Name)
 		}
+		// Metadata IO always goes through a cloned RW volume (s3-meta-<id>).
+		// Activating the sealed package snap here leaks an NVMe device with
+		// no mount／reader.
+		if ref.Role == "metadata" {
+			continue
+		}
 		if _, err := store.ResolveDevPath(ctx, ref.Name, ref.Kind); err != nil {
-			if ref.Role == "metadata" && isCowSemantic(err, cubecow.SemNotFound) {
-				continue
-			}
 			return fmt.Errorf("activate snapshot %s object %s: %w", id, ref.Name, err)
 		}
 	}

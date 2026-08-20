@@ -34,6 +34,31 @@ func TestStatusXFSHasNoRemoteUpload(t *testing.T) {
 	}
 }
 
+func TestBatchStatusPreservesOrderAndSkipsNil(t *testing.T) {
+	t.Parallel()
+	s := &service{}
+	rsp, err := s.BatchStatus(context.Background(), &api.BatchStatusRequest{
+		RequestId: "r-batch",
+		Items: []*api.StatusQuery{
+			{SnapshotId: "snap-a", Backend: "xfs"},
+			nil,
+			{SnapshotId: "snap-b", Backend: "xfs"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rsp.GetRequestId() != "r-batch" {
+		t.Fatalf("request_id=%q", rsp.GetRequestId())
+	}
+	if len(rsp.GetItems()) != 2 {
+		t.Fatalf("items=%d", len(rsp.GetItems()))
+	}
+	if rsp.GetItems()[0].GetSnapshotId() != "snap-a" || rsp.GetItems()[1].GetSnapshotId() != "snap-b" {
+		t.Fatalf("items=%v", rsp.GetItems())
+	}
+}
+
 func TestStatusS3WithoutStoreReportsFailedOrPending(t *testing.T) {
 	t.Parallel()
 	s := &service{}

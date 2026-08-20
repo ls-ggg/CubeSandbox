@@ -213,6 +213,12 @@ const (
 	// MasterAnnotationSnapshotRemoteUUIDs is the JSON blob of remote
 	// volume uuids (rootfs/memory/metadata) for cubecow_import_lvol.
 	MasterAnnotationSnapshotRemoteUUIDs = "cube.master.snapshot.remote_uuids"
+	// MasterAnnotationSnapshotCrossNode says placement landed this restore on
+	// a node that holds no replica of the package, so it has to be imported
+	// from S3 first. Value is the literal "true". Master is the only one that
+	// can know this, so Cubelet takes it as fact and refuses a restore it
+	// cannot satisfy instead of failing later on an unexplained catalog miss.
+	MasterAnnotationSnapshotCrossNode = "cube.master.snapshot.cross_node"
 	// MasterAnnotationDesiredSandboxID asks createid to use this sandbox ID
 	// instead of generating a new one (Resume-from-pause / same-ID recreate).
 	MasterAnnotationDesiredSandboxID = "cube.master.desired.sandbox.id"

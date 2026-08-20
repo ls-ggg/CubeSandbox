@@ -367,21 +367,14 @@ func (m *S3Cow) ResolveDevPath(ctx context.Context, name, kind string) (string, 
 	if _, err := m.deleteFunc(kind); err != nil {
 		return "", err
 	}
-	info, err := m.engine.GetVolumeInfo(name)
+	// Always ActivateVolume. s3lvol may reassign /dev/nvmeXn1 after
+	// deactivate／reactivate; GetVolumeInfo.DevicePath is cubecow's last
+	// cached path and must not be handed to cube-runtime as --memory-vol.
+	devPath, err := m.engine.ActivateVolume(name)
 	if err != nil {
 		return "", err
 	}
-	if info == nil {
-		return "", fmt.Errorf("cubecow object %q has empty info", name)
-	}
-	if info.DevicePath == "" {
-		devPath, err := m.engine.ActivateVolume(name)
-		if err != nil {
-			return "", err
-		}
-		return requireS3DevicePath(name, "ActivateVolume", devPath)
-	}
-	return strings.TrimSpace(info.DevicePath), nil
+	return requireS3DevicePath(name, "ActivateVolume", devPath)
 }
 
 // errS3EmptyDevicePath explains that s3lvol activated the object but the host

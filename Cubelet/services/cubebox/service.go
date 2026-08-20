@@ -240,13 +240,6 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		ExtInfo:   map[string][]byte{},
 	}
 
-	// Pause Resume: Master sends a thin Create (ids only); expand containers /
-	// volumes / annotations from sandbox_spec.json packed in the pause snap.
-	if err := expandPauseSnapshotPackage(req); err != nil {
-		rsp.Ret.RetMsg = err.Error()
-		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
-		return rsp, nil
-	}
 	if b := strings.TrimSpace(req.GetBackend()); b != "" {
 		if req.Annotations == nil {
 			req.Annotations = map[string]string{}
@@ -254,6 +247,20 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		if strings.TrimSpace(req.Annotations[constants.MasterAnnotationStorageBackend]) == "" {
 			req.Annotations[constants.MasterAnnotationStorageBackend] = b
 		}
+	}
+	// Cross-node restore: nothing about the package is on this node yet, so
+	// import it before any of the reads below expect a local catalog.
+	if err := ensureRemotePackageLocal(ctx, req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
+		return rsp, nil
+	}
+	// Pause Resume: Master sends a thin Create (ids only); expand containers /
+	// volumes / annotations from sandbox_spec.json packed in the pause snap.
+	if err := expandPauseSnapshotPackage(req); err != nil {
+		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+		return rsp, nil
 	}
 	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
 	if sid := resumeFromPauseSandboxID(req); sid != "" {

@@ -89,10 +89,13 @@ func TestEnsureS3MetadataBaseCreatesOnce(t *testing.T) {
 	require.Equal(t, 1, formatted)
 	require.Equal(t, []string{S3MetadataBaseVolumeName}, engine.createVolumes)
 	require.Equal(t, uint64(s3MetadataBaseSizeBytes), engine.createVolumeSizes[S3MetadataBaseVolumeName])
+	require.Contains(t, engine.deactivatedVolumes, S3MetadataBaseVolumeName)
+	require.Empty(t, engine.volumeInfos[S3MetadataBaseVolumeName].DevicePath)
 
 	require.NoError(t, EnsureS3MetadataBase(context.Background()))
 	require.Equal(t, 1, formatted)
 	require.Len(t, engine.createVolumes, 1)
+	require.Empty(t, engine.volumeInfos[S3MetadataBaseVolumeName].DevicePath)
 }
 
 func TestEnsureS3MetadataBaseRecreatesWhenMissing(t *testing.T) {
@@ -230,11 +233,13 @@ func TestUploadStatusUsesExportStatus(t *testing.T) {
 	require.Equal(t, cow.RemoteStateReady, st.State)
 }
 
-func TestUploadStatusEmptyExportStatusIsRunning(t *testing.T) {
+// No uuid yet means the export has not been recorded anywhere, so an empty
+// status is cubecow having nothing to report on rather than a lost export.
+func TestUploadStatusEmptyExportStatusWithoutUUIDIsRunning(t *testing.T) {
 	engine := &fakeCowEngine{
 		volumeInfos: map[string]*cubecow.Volume{
-			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20, ExportUUID: "uuid-root"},
-			"tpl-snap-1-memory": {SizeBytes: 64 << 20, ExportUUID: "uuid-mem"},
+			"tpl-snap-1-rootfs": {SizeBytes: 1 << 20},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20},
 		},
 	}
 	useTestCowStorage(t, engine)
@@ -242,6 +247,32 @@ func TestUploadStatusEmptyExportStatusIsRunning(t *testing.T) {
 	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
 	require.Equal(t, cow.RemoteStateRunning, st.State)
+}
+
+// s3lvol returns a uuid before it can tell whether the transfer will run,
+// and on failure records nothing under it: every later lookup then says no
+// such export and cubecow leaves the status empty. Reporting that as still
+// uploading leaves the package inprogress forever, because only a fresh
+// export can ever change the answer.
+func TestUploadStatusDeadExportUUIDIsFailed(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-snap-1-rootfs": {
+				SizeBytes:    1 << 20,
+				ExportUUID:   "uuid-root",
+				ExportStatus: cow.ExportStatusDone,
+			},
+			"tpl-snap-1-memory": {SizeBytes: 64 << 20, ExportUUID: "uuid-mem"},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	st, err := SnapshotUploadStatus(context.Background(), cow.BackendS3, "snap-1")
+	require.NoError(t, err)
+	require.Equal(t, cow.RemoteStateFailed, st.State)
+	// Name the dead uuid: re-exporting is the only fix, and the operator
+	// needs to know which role to re-export.
+	require.Contains(t, st.Message, "uuid-mem")
 }
 
 func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
@@ -270,6 +301,10 @@ func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 		Backend:      cow.BackendS3,
 	}))
 	require.NoError(t, FinalizeS3PackageSnapshots(context.Background(), cow.BackendS3, "snap-1"))
+	require.Contains(t, engine.deletedVolumes, S3MetadataVolumeName("snap-1"))
+	require.Contains(t, engine.deactivatedVolumes, S3MetadataVolumeName("snap-1"))
+	require.Contains(t, engine.deactivatedVolumes, S3MetadataSnapshotName("snap-1"))
+	require.NotContains(t, engine.activatedVolumes, S3MetadataSnapshotName("snap-1"))
 
 	uuids, err := UploadSnapshot(context.Background(), cow.BackendS3, "snap-1")
 	require.NoError(t, err)
@@ -298,6 +333,23 @@ func TestS3CowEmptyDevicePathAfterCreateFails(t *testing.T) {
 	_, err = store.createTemplateVolumePath("tpl-empty", 8<<20)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "empty device_path")
+}
+
+func TestS3ResolveDevPathAlwaysActivatesForLatestPath(t *testing.T) {
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-x-memory-snap": {DevicePath: "/dev/nvme17n1", SizeBytes: 64 << 20},
+		},
+		activatePaths: map[string]string{
+			"tpl-x-memory-snap": "/dev/nvme3n1",
+		},
+	}
+	store := &S3Cow{engine: engine}
+	devPath, err := store.ResolveDevPath(context.Background(), "tpl-x-memory-snap", cowKindSnapshot)
+	require.NoError(t, err)
+	require.Equal(t, "/dev/nvme3n1", devPath)
+	require.Equal(t, []string{"tpl-x-memory-snap"}, engine.activatedVolumes)
+	require.Equal(t, "/dev/nvme3n1", engine.volumeInfos["tpl-x-memory-snap"].DevicePath)
 }
 
 func TestS3CowEmptyDevicePathAfterActivateFails(t *testing.T) {
@@ -338,4 +390,105 @@ func TestIsS3MetadataBaseName(t *testing.T) {
 	require.Equal(t, "s3-meta-snap-1", S3MetadataCatalogVol(cow.BackendS3, "snap-1"))
 	require.Equal(t, cowKindVolume, S3MetadataCatalogKind(cow.BackendS3))
 	require.Equal(t, "", S3MetadataCatalogKind(cow.BackendXFS))
+}
+
+func TestEnsureS3MetadataBaseDeactivatesAlreadyActiveLeftover(t *testing.T) {
+	stubS3MetadataMounts(t)
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			S3MetadataBaseVolumeName:   {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + S3MetadataBaseVolumeName},
+			S3MetadataBaseSnapshotName: {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + S3MetadataBaseSnapshotName},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	require.NoError(t, EnsureS3MetadataBase(context.Background()))
+	require.Empty(t, engine.createVolumes)
+	require.Contains(t, engine.deactivatedVolumes, S3MetadataBaseVolumeName)
+	require.Contains(t, engine.deactivatedVolumes, S3MetadataBaseSnapshotName)
+	require.Empty(t, engine.volumeInfos[S3MetadataBaseVolumeName].DevicePath)
+	require.Empty(t, engine.volumeInfos[S3MetadataBaseSnapshotName].DevicePath)
+}
+
+func TestRemountS3MetadataDeactivatesSealedAlreadyActiveLeftovers(t *testing.T) {
+	stubS3MetadataMounts(t)
+	id := "tpl-leak-1"
+	vol := S3MetadataVolumeName(id)
+	snap := S3MetadataSnapshotName(id)
+	mem := "tpl-" + id + "-memory-snap"
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			S3MetadataBaseVolumeName:   {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + S3MetadataBaseVolumeName},
+			S3MetadataBaseSnapshotName: {SizeBytes: 8 << 20},
+			vol:                        {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + vol},
+			snap:                       {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + snap},
+			mem:                        {SizeBytes: 64 << 20, DevicePath: "/dev/mapper/" + mem},
+		},
+	}
+	useTestCowStorage(t, engine)
+
+	home := t.TempDir()
+	require.NoError(t, EnsureSnapshotPackage(cow.BackendS3, home))
+	require.NoError(t, WriteSnapshotCatalogFor(cow.BackendS3, &SnapshotCatalogEntry{
+		SnapshotID:   id,
+		SnapshotPath: home,
+		MetaDir:      filepath.Join(home, SnapshotMetadataDir),
+		RootfsVol:    "tpl-" + id + "-rootfs",
+		RootfsKind:   cowKindSnapshot,
+		MemoryVol:    mem,
+		MemoryKind:   cowKindSnapshot,
+		MetadataVol:  snap,
+		MetadataKind: cowKindSnapshot,
+		Backend:      cow.BackendS3,
+	}))
+	t.Cleanup(func() { DeleteSnapshotCatalogFor(cow.BackendS3, id) })
+
+	s3MetadataMu.Lock()
+	require.NoError(t, persistDerivedLocked(id, vol, filepath.Join(home, SnapshotMetadataDir)))
+	s3MetadataMu.Unlock()
+
+	require.NoError(t, RemountS3MetadataVolumes(context.Background()))
+	require.Empty(t, engine.createVolumeFromSnapshots)
+	require.Contains(t, engine.deactivatedVolumes, vol)
+	require.Contains(t, engine.deactivatedVolumes, snap)
+	require.Contains(t, engine.deactivatedVolumes, mem)
+	require.NotContains(t, engine.activatedVolumes, vol)
+	require.NotContains(t, engine.activatedVolumes, snap)
+	require.Empty(t, engine.volumeInfos[vol].DevicePath)
+	require.Empty(t, engine.volumeInfos[snap].DevicePath)
+	require.Empty(t, engine.volumeInfos[mem].DevicePath)
+}
+
+func TestRemountS3MetadataDeactivatesHostPackageDirWithoutCatalog(t *testing.T) {
+	stubS3MetadataMounts(t)
+	id := "tpl-7b70df45c3294788aa3dbbdb"
+	vol := S3MetadataVolumeName(id)
+	snap := S3MetadataSnapshotName(id)
+	mem := cowTemplateMemoryName(id) + "-snap"
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			S3MetadataBaseVolumeName:   {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + S3MetadataBaseVolumeName},
+			S3MetadataBaseSnapshotName: {SizeBytes: 8 << 20},
+			vol:                        {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + vol},
+			snap:                       {SizeBytes: 8 << 20, DevicePath: "/dev/mapper/" + snap},
+			mem:                        {SizeBytes: 64 << 20, DevicePath: "/dev/mapper/" + mem},
+		},
+	}
+	useTestCowStorage(t, engine)
+	work := t.TempDir()
+	localStorage.config.DataPath = work
+
+	home := SnapshotHome(cow.BackendS3, SnapshotKindNormal, id)
+	require.NoError(t, EnsureSnapshotPackage(cow.BackendS3, home))
+
+	require.NoError(t, RemountS3MetadataVolumes(context.Background()))
+	require.Empty(t, engine.createVolumeFromSnapshots)
+	require.Contains(t, engine.deactivatedVolumes, vol)
+	require.Contains(t, engine.deactivatedVolumes, snap)
+	require.Contains(t, engine.deactivatedVolumes, mem)
+	require.NotContains(t, engine.activatedVolumes, vol)
+	require.NotContains(t, engine.activatedVolumes, snap)
+	require.Empty(t, engine.volumeInfos[vol].DevicePath)
+	require.Empty(t, engine.volumeInfos[snap].DevicePath)
+	require.Empty(t, engine.volumeInfos[mem].DevicePath)
 }

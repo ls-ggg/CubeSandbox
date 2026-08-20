@@ -37,6 +37,7 @@ type fakeCowEngine struct {
 	deletedSnapshots            []string
 	deleteVolumeErr             error
 	deleteSnapshotErr           error
+	deleteErrByName             map[string]error
 	resizeErr                   error
 	resizedVolumes              map[string]uint64
 	metrics                     map[string]uint64
@@ -152,11 +153,17 @@ func (f *fakeCowEngine) DeactivateVolume(name string) error {
 
 func (f *fakeCowEngine) DeleteVolume(name string) error {
 	f.deletedVolumes = append(f.deletedVolumes, name)
+	if err, ok := f.deleteErrByName[name]; ok {
+		return err
+	}
 	return f.deleteVolumeErr
 }
 
 func (f *fakeCowEngine) DeleteSnapshot(name string) error {
 	f.deletedSnapshots = append(f.deletedSnapshots, name)
+	if err, ok := f.deleteErrByName[name]; ok {
+		return err
+	}
 	return f.deleteSnapshotErr
 }
 

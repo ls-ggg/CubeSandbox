@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -28,13 +29,22 @@ const (
 	// KindPauseSnapshot is the logical kind returned by GetTemplateKind for
 	// pause bindings. Pause rows no longer live in t_cube_template_definition.
 	KindPauseSnapshot = "pause_snapshot"
-	statusReady       = "READY"
-	statusCreating    = "CREATING"
+	// StatusReady marks a completed pause: the shim is gone and the sandbox
+	// exists only as this binding plus the node-local package.
+	StatusReady    = "READY"
+	statusReady    = StatusReady
+	statusCreating = "CREATING"
 	// StatusFailed is a terminal Pause failure. Binding and sandbox proxy are
 	// kept so the user can see the failure; Resume is rejected until Delete.
-	StatusFailed     = "FAILED"
-	statusFailed     = StatusFailed
-	snapshotIDPrefix = "snap-"
+	StatusFailed = "FAILED"
+	statusFailed = StatusFailed
+	// StatusDeleteFailed marks a Delete whose node-side cleanup failed: the
+	// shim is gone but the pause package is still on the node, so the binding
+	// stays as the record of what has to be swept. Distinct from StatusFailed,
+	// which says Pause itself failed and the shim is still alive.
+	StatusDeleteFailed = "DELETE_FAILED"
+	statusDeleteFailed = StatusDeleteFailed
+	snapshotIDPrefix   = "snap-"
 )
 
 var (
@@ -77,6 +87,44 @@ type Record struct {
 	RemoteStatus        string
 	OriginHostFactsJSON string
 	ExportUUIDs         string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+// ListOptions narrows List. Empty fields match every binding.
+type ListOptions struct {
+	// HostID matches either node_id or node_ip, mirroring how callers
+	// address a node elsewhere in Master.
+	HostID       string
+	InstanceType string
+}
+
+// List returns pause bindings, newest first.
+//
+// This table is Master's source of truth for paused sandboxes: their shim is
+// gone, so a node scan cannot be relied on to report them. Callers that page
+// over nodes should still call this once and merge the full result.
+func List(ctx context.Context, opts ListOptions) ([]*Record, error) {
+	client := getDB()
+	if client == nil {
+		return nil, ErrNotReady
+	}
+	query := client.WithContext(ctx).Table(constants.PauseSnapshotTableName)
+	if host := strings.TrimSpace(opts.HostID); host != "" {
+		query = query.Where("node_id = ? OR node_ip = ?", host, host)
+	}
+	if instanceType := strings.TrimSpace(opts.InstanceType); instanceType != "" {
+		query = query.Where("instance_type = ? OR instance_type = ''", instanceType)
+	}
+	var rows []models.PauseSnapshotRecord
+	if err := query.Order("updated_at desc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]*Record, 0, len(rows))
+	for i := range rows {
+		out = append(out, recordFromModel(&rows[i]))
+	}
+	return out, nil
 }
 
 // Begin allocates snapshotID and inserts a CREATING pause binding.
@@ -206,6 +254,41 @@ func MarkFailed(ctx context.Context, sandboxID, snapshotID, errMsg string) {
 	}
 }
 
+// MarkDeleteFailed records that Delete tore down the sandbox but could not
+// clear the pause package on the node. The binding is kept on purpose: it is
+// the only thing that still names the leftover package, and Delete is
+// idempotent, so a later retry (manual or from the lifecycle sweeper) resumes
+// from here once the node can drop the objects.
+func MarkDeleteFailed(ctx context.Context, sandboxID, snapshotID, errMsg string) {
+	client := getDB()
+	if client == nil {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	sandboxID = strings.TrimSpace(sandboxID)
+	snapshotID = strings.TrimSpace(snapshotID)
+	if sandboxID == "" || snapshotID == "" {
+		return
+	}
+	errMsg = strings.TrimSpace(errMsg)
+	if errMsg == "" {
+		errMsg = "delete pause snapshot failed"
+	}
+	if len(errMsg) > 1024 {
+		errMsg = errMsg[:1024]
+	}
+	res := client.WithContext(ctx).Table(constants.PauseSnapshotTableName).
+		Where("snapshot_id = ? AND sandbox_id = ?", snapshotID, sandboxID).
+		Updates(map[string]any{
+			"status":     statusDeleteFailed,
+			"last_error": errMsg,
+			"updated_at": gorm.Expr("CURRENT_TIMESTAMP"),
+		})
+	if res.Error != nil {
+		log.G(ctx).Warnf("pausesnap.MarkDeleteFailed sandbox=%s snap=%s: %v", sandboxID, snapshotID, res.Error)
+	}
+}
+
 // Abort removes a CREATING pause binding. Prefer MarkFailed for user-visible
 // Pause failures; Abort is only for clearing stale bindings when the sandbox is
 // already RUNNING again (see clearStalePauseBindingIfRunning).
@@ -291,6 +374,8 @@ func recordFromModel(row *models.PauseSnapshotRecord) *Record {
 		RemoteStatus:        row.RemoteStatus,
 		OriginHostFactsJSON: row.OriginHostFactsJSON,
 		ExportUUIDs:         row.ExportUUIDs,
+		CreatedAt:           row.CreatedAt,
+		UpdatedAt:           row.UpdatedAt,
 	}
 }
 

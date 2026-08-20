@@ -1137,15 +1137,18 @@ func TestRestoreFromTemplateSkipsMemoryPrefetchWithoutMemoryRef(t *testing.T) {
 	require.Len(t, fakeManager.createDefaultCalls, 1)
 }
 
-func TestRestoreFromTemplateKeepsExistingMemoryVolURL(t *testing.T) {
+func TestRestoreFromTemplateIgnoresStaleMemoryVolURL(t *testing.T) {
 	cfg := makeTestConfig(t)
 	cfg.StorageBackend = "cubecow"
-	fakeManager := &fakeCowVolumeManager{}
+	fakeManager := &fakeCowVolumeManager{
+		resolvePaths: map[string]string{"tpl-memory": "/dev/mapper/fresh"},
+	}
 
 	s := &local{config: cfg, cowManager: fakeManager}
 	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
 
 	templateID := "tpl-" + uuid.NewString()
+	seedTestSnapshotCatalog(t, templateID, "tpl-memory", CowKindVolume)
 	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
 	req := &cubebox.RunCubeSandboxRequest{
 		Volumes: []*cubebox.Volume{{
@@ -1154,9 +1157,7 @@ func TestRestoreFromTemplateKeepsExistingMemoryVolURL(t *testing.T) {
 		}},
 		Annotations: map[string]string{
 			constants.MasterAnnotationAppSnapshotTemplateID: templateID,
-			// Pre-resolved URL short-circuits the catalog lookup entirely;
-			// no catalog seeding is required.
-			constants.AnnotationVMSnapshotMemoryVolURL: "file:///dev/mapper/already",
+			constants.AnnotationVMSnapshotMemoryVolURL:      "file:///dev/mapper/already",
 		},
 		InstanceType: cubebox.InstanceType_cubebox.String(),
 	}
@@ -1167,8 +1168,9 @@ func TestRestoreFromTemplateKeepsExistingMemoryVolURL(t *testing.T) {
 
 	require.NoError(t, s.Create(ctx, opts))
 	res := opts.StorageInfo.(*StorageInfo)
-	assert.Equal(t, "file:///dev/mapper/already", res.RestoreMemoryVolURL)
-	assert.Empty(t, fakeManager.resolveCalls)
+	assert.Equal(t, "file:///dev/mapper/fresh", res.RestoreMemoryVolURL)
+	require.Len(t, fakeManager.resolveCalls, 1)
+	assert.Equal(t, fakeCowResolveCall{name: "tpl-memory", kind: CowKindVolume}, fakeManager.resolveCalls[0])
 	require.Len(t, fakeManager.createSnapshotCalls, 1)
 }
 

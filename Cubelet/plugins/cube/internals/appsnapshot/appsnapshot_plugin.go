@@ -15,6 +15,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 )
@@ -67,16 +68,29 @@ func (l *appsnapshotCompleter) Create(ctx context.Context, opts *workflow.Create
 		return nil
 	}
 
-	// Pause snaps are storage catalogs, not Cube run templates. Resume still
-	// needs the original tpl-* for kernel／image components.
+	ann := opts.ReqInfo.GetAnnotations()
+	// The package this Create restores from carries the same kernel／image
+	// metadata on its own disk, so it can stand in for the template.
+	packageID := strings.TrimSpace(ann[constants.MasterAnnotationRuntimeSnapshotID])
+	// Pause snaps are storage catalogs, not Cube run templates, so Resume
+	// asks for the original tpl-* first.
 	if opts.IsPauseResume() {
-		ann := opts.ReqInfo.GetAnnotations()
 		if orig := strings.TrimSpace(ann[constants.MasterAnnotationAppSnapshotTemplateID]); orig != "" {
 			templateID = orig
 		}
 	}
 
 	lrt, err := l.runtemplateManager.EnsureCubeRunTemplate(ctx, templateID)
+	if err != nil && packageID != "" && packageID != templateID {
+		// Cross-node restore: the template was never built on this node, but
+		// the package was just imported here and describes the same VM.
+		fallback, fallbackErr := l.runtemplateManager.EnsureCubeRunTemplate(ctx, packageID)
+		if fallbackErr == nil {
+			log.G(ctx).Infof("run template %s is not on this node; restoring from package %s instead",
+				templateID, packageID)
+			lrt, err = fallback, nil
+		}
+	}
 	if err != nil {
 		return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "ensure cube run template %s failed: %v", templateID, err)
 	}

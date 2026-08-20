@@ -302,6 +302,7 @@ export default withMermaid(defineConfig({
                 { text: '沙箱生命周期', link: '/zh/guide/lifecycle' },
                 { text: '模板概览', link: '/zh/guide/templates' },
                 { text: '快照、回滚与克隆', link: '/zh/guide/snapshot-rollback-clone' },
+                { text: '跨机 Pause／Resume 与快照', link: '/zh/guide/cross-node-pause-snapshot' },
                 { text: '数字助手', link: '/zh/guide/digital-assistant' },
                 { text: '性能测试', link: '/zh/guide/performance-benchmark' }
               ]
