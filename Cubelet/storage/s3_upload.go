@@ -8,8 +8,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
 type s3UploadEntry struct {
@@ -77,6 +79,100 @@ func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs
 	// Export accepted; upload may still be in flight on the S3 backend.
 	m.setUpload(id, cow.RemoteStateRunning, "export started", uuids)
 	return uuids, nil
+}
+
+// UploadTemplateRootfs exports only the rootfs object of a template package.
+//
+// A sandbox rootfs is a child snapshot of the template's rootfs, and a
+// reference export names just the objects the exported layer owns: the
+// child's export carries its own delta and nothing of the parent. Without
+// the parent exported, importing that child on another node yields a hole
+// where the base layer should be — the ext4 superblock and root inode live
+// in the parent, so the volume does not even mount. Exporting the parent
+// here is what makes the child resolvable elsewhere.
+//
+// A template's memory and metadata are not part of that chain (sandbox
+// memory is a fresh single-layer volume; metadata derives from a node-local
+// base and exports as a merged copy), so they stay node-local.
+func (m *S3Cow) UploadTemplateRootfs(ctx context.Context, snapshotID string) (string, error) {
+	id := strings.TrimSpace(snapshotID)
+	if id == "" {
+		return "", fmt.Errorf("snapshot_id is required")
+	}
+	rootfs := ""
+	for _, ref := range activateObjectRefs(ctx, cow.BackendS3, id) {
+		if ref.Role == "rootfs" {
+			rootfs = strings.TrimSpace(ref.Name)
+			break
+		}
+	}
+	if rootfs == "" {
+		return "", fmt.Errorf("no rootfs object for %s", id)
+	}
+	uuid, err := m.uploadOne(rootfs)
+	if err != nil {
+		return "", fmt.Errorf("upload rootfs %s: %w", rootfs, err)
+	}
+	// Settle before returning: the template is only usable cross-node once
+	// its objects are committed, and nothing later in template creation
+	// waits on this.
+	m.waitExportSettled(ctx, rootfs, uuid, time.Now().Add(exportSettleBudget))
+	if entry, err := GetLocalSnapshotFor(ctx, cow.BackendS3, id); err == nil && entry != nil {
+		if entry.RemoteUUIDs == nil {
+			entry.RemoteUUIDs = &cow.RemoteUUIDs{}
+		}
+		entry.RemoteUUIDs.Rootfs = uuid
+		_ = WriteSnapshotCatalogFor(cow.BackendS3, entry)
+	}
+	return uuid, nil
+}
+
+// exportSettleBudget caps the total time Upload spends spacing out a
+// package's exports. Pause runs Upload and then a Destroy inside one 120s
+// budget, so this leaves room for the Destroy even in the worst case. An
+// export pins existing S3 objects rather than copying bytes, so the wait
+// is a drain, not a transfer, and is normally seconds.
+const exportSettleBudget = 75 * time.Second
+
+// waitExportSettled blocks until this object's export is out of the
+// backend's drain path, so the next export does not collide with it.
+//
+// s3lvol drains one lvstore at a time and gives a waiting export 5s to win
+// that race. Every package exports three objects out of the same lvstore,
+// and export_snapshot returns its uuid before any bytes move, so issuing
+// them back to back — which is what a plain sequential loop does — loses
+// two of the three to "Device or resource busy".
+//
+// Advisory: a wait that runs out of budget or lands on a dead export is
+// reported by UploadStatus, not here, because Upload only promises that
+// the exports were accepted.
+func (m *S3Cow) waitExportSettled(ctx context.Context, name, uuid string, deadline time.Time) {
+	for {
+		info, infoErr := m.GetVolumeInfo(ctx, name)
+		status := ""
+		if info != nil {
+			status = strings.ToUpper(strings.TrimSpace(info.ExportStatus))
+		}
+		switch {
+		case infoErr == nil && status == cow.ExportStatusDone:
+			return
+		case infoErr == nil && status == "" && uuid != "":
+			// s3lvol dropped the uuid: the export failed and no amount of
+			// waiting brings it back.
+			CubeLog.Warnf("s3 export %s (%s) died before draining", name, uuid)
+			return
+		}
+		if time.Now().After(deadline) {
+			CubeLog.Warnf("s3 export %s (%s) still %q when the settle budget ran out; continuing",
+				name, uuid, status)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func (m *S3Cow) uploadOne(name string) (string, error) {

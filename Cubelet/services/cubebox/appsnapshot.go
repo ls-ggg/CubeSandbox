@@ -447,8 +447,16 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 		stepLog.Warnf("s3 finalize package snapshots %s failed: %v", templateID, err)
 	}
 
-	// Templates stay node-local: no Upload. Cross-node export applies to
-	// Pause and ordinary CommitSandbox snapshots only.
+	// Export the rootfs snapshot only. Every sandbox rootfs is a child of
+	// it, and a child's export carries no parent data, so without this a
+	// cross-node restore imports a rootfs with no base layer. Memory and
+	// metadata of a template are not in that chain and stay node-local.
+	// Best-effort: a template that fails to export still works on this node.
+	if uuid, err := storage.UploadTemplateRootfs(ctx, backend, templateID); err != nil {
+		stepLog.Warnf("s3 export template rootfs %s failed: %v", templateID, err)
+	} else if uuid != "" {
+		stepLog.Infof("s3 exported template rootfs %s uuid=%s", templateID, uuid)
+	}
 
 	stepLog.Infof("AppSnapshot completed successfully: snapshotPath=%s", snapshotPath)
 	rsp.Ret.RetMsg = "success"

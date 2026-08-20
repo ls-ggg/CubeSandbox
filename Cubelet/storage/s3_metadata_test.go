@@ -321,6 +321,54 @@ func TestUploadSkipsMetadataBaseAndUploadsDerived(t *testing.T) {
 	require.Contains(t, err.Error(), "node-local s3 metadata base")
 }
 
+func TestUploadTemplateRootfsExportsOnlyRootfs(t *testing.T) {
+	stubS3MetadataMounts(t)
+	engine := &fakeCowEngine{
+		volumeInfos: map[string]*cubecow.Volume{
+			"tpl-tpl-1-rootfs":              {SizeBytes: 1 << 20},
+			"tpl-tpl-1-memory-snap":         {SizeBytes: 64 << 20},
+			S3MetadataSnapshotName("tpl-1"): {SizeBytes: 8 << 20},
+		},
+	}
+	useTestCowStorage(t, engine)
+	home := t.TempDir()
+	require.NoError(t, EnsureSnapshotPackage(cow.BackendS3, home))
+	require.NoError(t, WriteSnapshotCatalogFor(cow.BackendS3, &SnapshotCatalogEntry{
+		SnapshotID:   "tpl-1",
+		SnapshotPath: home,
+		MetaDir:      filepath.Join(home, SnapshotMetadataDir),
+		RootfsVol:    "tpl-tpl-1-rootfs",
+		RootfsKind:   cowKindSnapshot,
+		MemoryVol:    "tpl-tpl-1-memory-snap",
+		MemoryKind:   cowKindSnapshot,
+		MetadataVol:  S3MetadataSnapshotName("tpl-1"),
+		MetadataKind: cowKindSnapshot,
+		Kind:         CatalogKindTemplate,
+		Backend:      cow.BackendS3,
+	}))
+
+	uuid, err := UploadTemplateRootfs(context.Background(), cow.BackendS3, "tpl-1")
+	require.NoError(t, err)
+	require.NotEmpty(t, uuid)
+	require.Contains(t, engine.exportSnapshots, "tpl-tpl-1-rootfs")
+	require.NotContains(t, engine.exportSnapshots, "tpl-tpl-1-memory-snap")
+	require.NotContains(t, engine.exportSnapshots, S3MetadataSnapshotName("tpl-1"))
+
+	entry, err := GetLocalSnapshotFor(context.Background(), cow.BackendS3, "tpl-1")
+	require.NoError(t, err)
+	require.NotNil(t, entry.RemoteUUIDs)
+	require.Equal(t, uuid, entry.RemoteUUIDs.Rootfs)
+	require.Empty(t, entry.RemoteUUIDs.Memory)
+	require.Empty(t, entry.RemoteUUIDs.Metadata)
+}
+
+func TestUploadTemplateRootfsIsNoOpOnXFS(t *testing.T) {
+	useTestCowStorage(t, &fakeCowEngine{})
+	uuid, err := UploadTemplateRootfs(context.Background(), cow.BackendXFS, "tpl-1")
+	require.NoError(t, err)
+	require.Empty(t, uuid)
+}
+
 func TestS3CowEmptyDevicePathAfterCreateFails(t *testing.T) {
 	engine := &fakeCowEngine{createVolumePath: ""}
 	store := &S3Cow{engine: engine}
