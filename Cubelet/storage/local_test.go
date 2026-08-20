@@ -1894,6 +1894,37 @@ func TestRecoverStorageStateRefreshesAndPersistsCowPaths(t *testing.T) {
 	require.Equal(t, "/dev/mapper/refreshed", loaded.Volumes["test"].FilePath)
 }
 
+func TestRecoverStorageStateDefersWhileS3Initializing(t *testing.T) {
+	cfg := makeTestConfig(t)
+	cfg.StorageBackend = "cubecow"
+	s := &local{config: cfg, cowManager: &fakeCowVolumeManager{}}
+	assert.NoError(t, s.init(&plugin.InitContext{Context: context.Background()}))
+
+	ctx := namespaces.WithNamespace(context.Background(), namespaces.Default)
+	info := &StorageInfo{
+		Namespace: "default",
+		SandboxID: "s3-recover-test",
+		Backend:   cow.BackendS3,
+		Volumes: map[string]*BackendFileInfo{
+			"test": {
+				Name:       "test",
+				FilePath:   "/dev/mapper/stale",
+				VolumeName: "sb-s3-recover-test",
+				Kind:       cowKindVolume,
+			},
+		},
+	}
+	require.NoError(t, s.writeBackendFileInfo(ctx, "s3-recover-test", info))
+
+	// The s3 handle is unpublished, so refreshing this entry fails with
+	// ErrS3NotReady. Recovery must skip it rather than wedge the node.
+	require.NoError(t, s.RecoverStorageState(ctx))
+
+	loaded, err := s.readBackendFileInfoRaw(ctx, "s3-recover-test")
+	require.NoError(t, err)
+	require.Equal(t, "/dev/mapper/stale", loaded.Volumes["test"].FilePath)
+}
+
 func TestRecoverSandboxStorageIgnoresMissingStorageInfo(t *testing.T) {
 	cfg := makeTestConfig(t)
 	cfg.StorageBackend = "cubecow"

@@ -13,8 +13,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
 )
 
+// Not parallel: SetSnapshotCatalogRootsFor is process-global, so two of
+// these running at once read each other's roots (or a Cleanup that already
+// cleared them).
 func TestSnapshotCatalogNamespacesAreIsolated(t *testing.T) {
-	t.Parallel()
 	xfsRoot := t.TempDir()
 	s3Root := t.TempDir()
 	SetSnapshotCatalogRootsFor(cow.BackendXFS, xfsRoot)
@@ -62,7 +64,6 @@ func TestSnapshotCatalogNamespacesAreIsolated(t *testing.T) {
 }
 
 func TestS3CatalogLivesUnderMetadata(t *testing.T) {
-	t.Parallel()
 	s3Root := t.TempDir()
 	SetSnapshotCatalogRootsFor(cow.BackendS3, s3Root)
 	t.Cleanup(func() {
@@ -100,7 +101,6 @@ func TestS3CatalogLivesUnderMetadata(t *testing.T) {
 }
 
 func TestXFSCatalogLivesUnderMetadata(t *testing.T) {
-	t.Parallel()
 	xfsRoot := t.TempDir()
 	SetSnapshotCatalogRootsFor(cow.BackendXFS, xfsRoot)
 	t.Cleanup(func() {

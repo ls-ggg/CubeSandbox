@@ -251,7 +251,9 @@ type StateRecoverer interface {
 }
 
 func (l *local) RecoverStorageState(ctx context.Context) error {
-	if !l.useCowStorage() {
+	// The S3 init loop can re-enter this before storage init opened the db;
+	// nothing is recorded yet in that case.
+	if !l.useCowStorage() || l.db == nil {
 		return nil
 	}
 
@@ -286,6 +288,15 @@ func (l *local) RecoverStorageState(ctx context.Context) error {
 					CubeLog.Warnf("storage recover: failed to drop stale entry %s from db: %v", id, delErr)
 				}
 				_ = atomicDelete(filepath.Join(l.failoverDir(), id))
+				continue
+			}
+			// The S3 handle is published asynchronously by the init loop,
+			// so boot recovery can legitimately run before it exists. A
+			// node must not refuse to start because one of its sandboxes
+			// lives on a backend that is still coming up; the init loop
+			// re-runs this pass once the handle is ready.
+			if errors.Is(err, ErrS3NotReady) {
+				CubeLog.Warnf("storage recover: deferring id=%s until s3 storage is ready: %v", id, err)
 				continue
 			}
 			return err
@@ -352,6 +363,10 @@ func (l *local) init(ic *plugin.InitContext) error {
 		if err := l.ensureCowManager(); err != nil {
 			return err
 		}
+		// Bring S3 up before recovery: recovery resolves each sandbox's
+		// device paths through its own backend, so an s3-backed sandbox
+		// needs the S3 handle to already exist.
+		l.initS3CowSync(ic.Context)
 		if err := l.RecoverStorageState(ic.Context); err != nil {
 			return err
 		}

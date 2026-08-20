@@ -426,6 +426,11 @@ func init() {
 			CubeLog.Debugf("%v init config:%+v",
 				fmt.Sprintf("%v.%v", constants.InternalPlugin, constants.StorageID), localStorage.config)
 
+			// Register catalog roots before storage init: init brings up the
+			// S3 handle, whose metadata step enumerates local packages.
+			SetSnapshotCatalogRootsFor(cow.BackendXFS, catalogKindRoots(cow.BackendXFS)...)
+			SetSnapshotCatalogRootsFor(cow.BackendS3, catalogKindRoots(cow.BackendS3)...)
+
 			if err := localStorage.init(ic); err != nil {
 				CubeLog.Errorf("plugin %s init fail:%v", constants.StorageID, err)
 				return nil, err
@@ -437,12 +442,9 @@ func init() {
 				return nil, err
 			}
 
-			SetSnapshotCatalogRootsFor(cow.BackendXFS, catalogKindRoots(cow.BackendXFS)...)
-			SetSnapshotCatalogRootsFor(cow.BackendS3, catalogKindRoots(cow.BackendS3)...)
-
-			// S3 cubecow + metadata base: background retry so cubelet does
-			// not depend on s3lvol being up at startup. S3 requests fail
-			// with ErrS3NotReady until the loop succeeds.
+			// Fallback only: storage init already tried to bring the S3
+			// handle up synchronously. This keeps retrying when s3lvol was
+			// down at startup, and is a no-op once the handle exists.
 			localStorage.startS3CowInitLoop(ic.Context)
 
 			return localStorage, nil
