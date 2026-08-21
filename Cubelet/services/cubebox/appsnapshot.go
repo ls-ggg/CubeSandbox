@@ -448,10 +448,13 @@ func (s *service) AppSnapshot(ctx context.Context, req *cubebox.AppSnapshotReque
 	}
 
 	// Export the rootfs snapshot only. Every sandbox rootfs is a child of
-	// it, and a child's export carries no parent data, so without this a
-	// cross-node restore imports a rootfs with no base layer. Memory and
-	// metadata of a template are not in that chain and stay node-local.
-	// Best-effort: a template that fails to export still works on this node.
+	// it, and a child's export references only chunks that already have a
+	// committed S3 object — the parent's are silently skipped, so without
+	// this a cross-node restore imports a rootfs with no ext4 metadata at
+	// all (measured: 17 objects／7.2MB instead of 80／74.9MB; the imported
+	// disk has no root inode). Memory and metadata of a template are not in
+	// that chain and stay node-local. Best-effort: a template that fails to
+	// export still works on this node.
 	if uuid, err := storage.UploadTemplateRootfs(ctx, backend, templateID); err != nil {
 		stepLog.Warnf("s3 export template rootfs %s failed: %v", templateID, err)
 	} else if uuid != "" {

@@ -190,6 +190,38 @@ func TestCloneS3MetadataFromParentUsesParentVolume(t *testing.T) {
 	require.True(t, s3MetadataIsMounted(mount))
 }
 
+// Cross-node create: no package on this node to clone from, so the child's
+// metadata is imported from S3 under the child's own name. Nothing may land
+// under the package's name, or the sandbox would own the node's only copy.
+func TestImportS3MetadataForSandboxUsesSandboxName(t *testing.T) {
+	stubS3MetadataMounts(t)
+	engine := &fakeCowEngine{}
+	useTestCowStorage(t, engine)
+
+	mount := t.TempDir()
+	child := S3MetadataVolumeName("sb-x")
+	require.NoError(t, ImportS3MetadataForSandbox(context.Background(), cow.BackendS3, "sb-x", "uuid-meta", mount))
+	require.Equal(t, [][2]string{{child, "uuid-meta"}}, engine.importedLvols)
+	require.Contains(t, engine.activatedVolumes, child)
+	require.True(t, s3MetadataIsMounted(mount))
+	require.Empty(t, engine.createVolumeFromSnapshots)
+
+	// Destroy finds it by the sandbox name and takes it with the sandbox.
+	require.NoError(t, ReleaseS3MetadataVolume(context.Background(), cow.BackendS3, "sb-x"))
+	require.Contains(t, engine.deletedVolumes, child)
+	require.False(t, s3MetadataIsMounted(mount))
+}
+
+func TestImportS3MetadataForSandboxRefusesBase(t *testing.T) {
+	stubS3MetadataMounts(t)
+	engine := &fakeCowEngine{}
+	useTestCowStorage(t, engine)
+
+	err := ImportS3MetadataForSandbox(context.Background(), cow.BackendS3, "", "uuid-meta", t.TempDir())
+	require.Error(t, err)
+	require.Empty(t, engine.importedLvols)
+}
+
 func TestCloneS3MetadataFromParentFallsBackToBase(t *testing.T) {
 	stubS3MetadataMounts(t)
 	engine := &fakeCowEngine{

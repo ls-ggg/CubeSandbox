@@ -377,6 +377,54 @@ func CloneS3MetadataFromParent(ctx context.Context, backend, parentID, childID, 
 	return persistDerivedLocked(childID, vol.VolumeName, mountPath)
 }
 
+// ImportS3MetadataForSandbox gives a cross-node sandbox its own metadata
+// disk by importing the package's exported metadata under the sandbox's
+// name, then mounting it at mountPath.
+//
+// This is the cross-node counterpart of [CloneS3MetadataFromParent]: with no
+// package on this node there is nothing to clone from, and import_lvol hands
+// back a RW volume, which is exactly what a clone would have produced.
+// Naming it s3-meta-<sandboxID> is what lets ReleaseS3MetadataVolume find it
+// at destroy.
+func ImportS3MetadataForSandbox(ctx context.Context, backend, sandboxID, metadataUUID, mountPath string) error {
+	if !isS3CatalogBackend(backend) {
+		return nil
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	metadataUUID = strings.TrimSpace(metadataUUID)
+	mountPath = strings.TrimSpace(mountPath)
+	if sandboxID == "" || metadataUUID == "" || mountPath == "" {
+		return fmt.Errorf("s3 metadata import needs a sandbox id, uuid and mount path")
+	}
+	store, err := requireS3Cow()
+	if err != nil {
+		return err
+	}
+	if store == nil {
+		return fmt.Errorf("s3 cow store is not initialized")
+	}
+	name := S3MetadataVolumeName(sandboxID)
+	if IsS3MetadataBaseName(name) {
+		return fmt.Errorf("refusing to import s3 metadata onto the node-local base")
+	}
+	targets := []CowObjectRef{{Name: name, Kind: cowKindVolume, Role: "metadata"}}
+	if err := store.FetchAs(ctx, targets, &cow.RemoteUUIDs{Metadata: metadataUUID}, true); err != nil {
+		return err
+	}
+
+	s3MetadataMu.Lock()
+	defer s3MetadataMu.Unlock()
+
+	devPath, err := store.ResolveDevPath(ctx, name, cowKindVolume)
+	if err != nil {
+		return fmt.Errorf("resolve imported s3 metadata %s: %w", name, err)
+	}
+	if err := mountS3MetadataLocked(sandboxID, devPath, mountPath); err != nil {
+		return err
+	}
+	return persistDerivedLocked(sandboxID, name, mountPath)
+}
+
 // MountS3MetadataAt mounts the package metadata disk at mountPath.
 // IO always goes through a RW volume (s3-meta-<id>). If only the sealed
 // snap remains, it is cloned to that volume first — never activate／mount

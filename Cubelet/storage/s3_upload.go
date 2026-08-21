@@ -39,6 +39,7 @@ func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs
 		return nil, fmt.Errorf("snapshot_id is required")
 	}
 	uuids := &cow.RemoteUUIDs{}
+	var exportable []CowObjectRef
 	for _, ref := range activateObjectRefs(ctx, cow.BackendS3, id) {
 		if IsS3MetadataBaseName(ref.Name) {
 			continue
@@ -54,6 +55,10 @@ func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs
 				continue
 			}
 		}
+		exportable = append(exportable, ref)
+	}
+	settleBy := time.Now().Add(exportSettleBudget)
+	for i, ref := range exportable {
 		uuid, err := m.uploadOne(ref.Name)
 		if err != nil {
 			m.setUpload(id, cow.RemoteStateFailed, err.Error(), nil)
@@ -66,6 +71,12 @@ func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs
 			uuids.Memory = uuid
 		case "metadata":
 			uuids.Metadata = uuid
+		}
+		// Space the exports out: they share one lvstore and only one can
+		// drain at a time. The last one has nobody to collide with, and
+		// Pause needs the remaining budget for its Destroy.
+		if i < len(exportable)-1 {
+			m.waitExportSettled(ctx, ref.Name, uuid, settleBy)
 		}
 	}
 	if uuids.Empty() {

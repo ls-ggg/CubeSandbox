@@ -48,6 +48,41 @@ func (m *S3Cow) Fetch(ctx context.Context, snapshotID string, uuids *cow.RemoteU
 	return nil
 }
 
+// FetchAs imports remote objects under names the caller picks, taking the
+// export uuid for each target from its Role.
+//
+// Cross-node sandboxes use this rather than [S3Cow.Fetch]: import_lvol hands
+// back a RW volume, and a volume named after the sandbox lives and dies with
+// it exactly like the clone a same-node create would have made. Importing
+// under the package's own names instead gives one sandbox the node's only
+// copy of a snapshot that later creates still need, and leaves nothing for
+// destroy to key on.
+func (m *S3Cow) FetchAs(ctx context.Context, targets []CowObjectRef, uuids *cow.RemoteUUIDs, activate bool) error {
+	if uuids.Empty() {
+		return fmt.Errorf("remote_uuids is required for fetch")
+	}
+	for _, target := range targets {
+		name := strings.TrimSpace(target.Name)
+		uuid := uuidForRole(uuids, target.Role)
+		if name == "" || uuid == "" {
+			continue
+		}
+		if IsS3MetadataBaseName(name) {
+			return fmt.Errorf("refusing to import %s onto the node-local s3 metadata base", target.Role)
+		}
+		if err := m.fetchOne(ctx, name, uuid); err != nil {
+			return fmt.Errorf("fetch %s %s: %w", target.Role, name, err)
+		}
+		if !activate {
+			continue
+		}
+		if _, err := m.engine.ActivateVolume(name); err != nil && !isCowSemantic(err, cubecow.SemAlreadyExists) {
+			return fmt.Errorf("activate fetched %s %s: %w", target.Role, name, err)
+		}
+	}
+	return nil
+}
+
 func appendMetadataFetchRef(refs []CowObjectRef, snapshotID string, uuids *cow.RemoteUUIDs) []CowObjectRef {
 	if uuids == nil || strings.TrimSpace(uuids.Metadata) == "" {
 		return refs

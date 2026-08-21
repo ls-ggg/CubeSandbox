@@ -847,7 +847,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 		log.G(ctx).Fatalf("Create panic info:%s, stack:%s", panicError, string(debug.Stack()))
 		retErr = ret.Errorf(errorcode.ErrorCode_CreateStorageFailed, "%s", panicError)
 	})
-	var restoreMemoryVolURL string
+	var restoreMemoryVolURL, importedMemoryVol string
 	eg, groupCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
 		var err error
@@ -866,17 +866,19 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (retEr
 		return err
 	})
 	eg.Go(func() error {
-		url, err := l.prefetchRestoreMemoryVolURL(groupCtx, opts)
+		url, imported, err := l.prefetchRestoreMemoryVolURL(groupCtx, opts)
 		if err != nil {
 			return err
 		}
 		restoreMemoryVolURL = url
+		importedMemoryVol = imported
 		return nil
 	})
 	if err = eg.Wait(); err != nil {
 		return ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateStorageFailed)
 	}
 	result.RestoreMemoryVolURL = restoreMemoryVolURL
+	result.ImportedMemoryVol = importedMemoryVol
 
 	start := time.Now()
 	err = l.writeBackendFileInfo(ctx, opts.SandboxID, result)
@@ -946,42 +948,101 @@ func (l *local) cleanupCreateResult(ctx context.Context, result *StorageInfo) er
 	return errs
 }
 
-func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.CreateContext) (string, error) {
+// prefetchRestoreMemoryVolURL resolves the memory image the shim restores
+// from, and reports the name of the disk when this create imported one of
+// its own (cross-node) rather than pointing at the package's shared image.
+func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.CreateContext) (string, string, error) {
 	if opts == nil || opts.ReqInfo == nil || opts.IsCreateSnapshot() {
-		return "", nil
+		return "", "", nil
 	}
 	// Emptydir / file pools do not use the cubecow snapshot catalog.
 	if !l.useCowStorage() {
-		return "", nil
+		return "", "", nil
 	}
 	if _, ok := opts.GetSnapshotTemplateID(); !ok {
-		return "", nil
+		return "", "", nil
 	}
 	annotations := opts.ReqInfo.GetAnnotations()
 	// Do not trust AnnotationVMSnapshotMemoryVolURL: it may be a stale
 	// file:///dev/nvmeXn1 from a previous activate on this or another node.
 	// Always resolve the catalog vol name and Activate for the live path.
 	backend := createContextStorageBackend(opts)
+	if url, imported, err := l.importRestoreMemoryVol(ctx, opts, backend); err != nil || imported != "" {
+		return url, imported, err
+	}
 	volumeName, volumeKind, err := l.resolveSnapshotMemoryVolFromCatalog(ctx, backend, annotations)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if volumeName == "" {
-		return "", nil
+		return "", "", nil
 	}
 	normalizedKind, err := normalizeCowKind(volumeKind)
 	if err != nil {
-		return "", fmt.Errorf("invalid snapshot memory volume kind %q: %w", volumeKind, err)
+		return "", "", fmt.Errorf("invalid snapshot memory volume kind %q: %w", volumeKind, err)
 	}
 	store, err := l.storeForBackend(backend)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	devPath, err := store.ResolveDevPath(ctx, volumeName, normalizedKind)
 	if err != nil {
-		return "", fmt.Errorf("resolve snapshot memory volume %s: %w", volumeName, err)
+		return "", "", fmt.Errorf("resolve snapshot memory volume %s: %w", volumeName, err)
 	}
-	return cowFileURLFromPath(devPath), nil
+	return cowFileURLFromPath(devPath), "", nil
+}
+
+// importRestoreMemoryVol imports the package's memory image as this
+// sandbox's own disk, returning its device URL and the name it landed under.
+// Cross-node only; every other restore gets an empty name and falls through
+// to the catalog lookup, which points at the package's shared image.
+func (l *local) importRestoreMemoryVol(ctx context.Context, opts *workflow.CreateContext, backend string) (string, string, error) {
+	if backend != cow.BackendS3 || !crossNodeRestoreFromCreateContext(opts) {
+		return "", "", nil
+	}
+	uuids := remoteUUIDsFromCreateContext(opts)
+	if uuids == nil || strings.TrimSpace(uuids.Memory) == "" {
+		// Rootfs-only packages legitimately have no memory image.
+		return "", "", nil
+	}
+	sandboxID := strings.TrimSpace(opts.SandboxID)
+	if sandboxID == "" {
+		return "", "", fmt.Errorf("cross-node memory import needs a sandbox id")
+	}
+	name := SandboxMemoryName(sandboxID)
+	targets := []CowObjectRef{{Name: name, Kind: cowKindVolume, Role: "memory"}}
+	if err := FetchSnapshotAs(ctx, backend, targets, &cow.RemoteUUIDs{Memory: uuids.Memory}, true); err != nil {
+		return "", "", err
+	}
+	store, err := l.storeForBackend(backend)
+	if err != nil {
+		return "", "", err
+	}
+	devPath, err := store.ResolveDevPath(ctx, name, cowKindVolume)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve imported memory %s: %w", name, err)
+	}
+	return cowFileURLFromPath(devPath), name, nil
+}
+
+// releaseImportedMemoryVol deletes the memory disk this sandbox imported.
+// Driven by what Create recorded rather than by the naming convention, so a
+// same-node restore — whose memory is the package's snapshot — is untouched.
+func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, info *StorageInfo) {
+	name := strings.TrimSpace(info.ImportedMemoryVol)
+	if name == "" || backend != cow.BackendS3 {
+		return
+	}
+	store, err := l.storeForBackend(backend)
+	if err != nil || store == nil {
+		return
+	}
+	if err := store.DeactivateByKind(ctx, name, cowKindVolume); err != nil {
+		log.G(ctx).Warnf("destroy sandbox %s: deactivate imported memory %s: %v", info.SandboxID, name, err)
+	}
+	if err := store.DeleteByKind(ctx, name, cowKindVolume); err != nil {
+		log.G(ctx).Warnf("destroy sandbox %s: delete imported memory %s: %v", info.SandboxID, name, err)
+	}
 }
 
 // resolveSnapshotMemoryVolFromCatalog returns the (memory_vol, memory_kind)
@@ -1258,14 +1319,10 @@ func (l *local) allocateSnapshotRootfs(ctx context.Context, opts *workflow.Creat
 	// import, and only an import is a RW volume that can be used in place.
 	fetchedRemote := !uuids.Empty() && backend == cow.BackendS3 && crossNodeRestoreFromCreateContext(opts)
 	if fetchedRemote {
-		// import_lvol yields RW volumes ready for Resume／create; use in place.
-		if err := FetchSnapshot(ctx, backend, templateID, uuids, true); err != nil {
-			return nil, err
-		}
-		if err := activateStoreObjects(ctx, store, backend, templateID); err != nil {
-			return nil, err
-		}
-		return attachExistingSnapshotRootfs(ctx, store, backend, templateID)
+		// import_lvol already yields a RW volume, so the import target is
+		// the sandbox's own rootfs name — the same disk a same-node create
+		// would have cloned, and one destroy already knows how to delete.
+		return importSandboxRootfs(ctx, store, backend, sandboxID, uuids, desiredSizeBytes)
 	}
 	// Cold start and same-node Pause Resume: always clone the package rootfs
 	// snapshot into a sandbox-private RW volume (sb-<id>-rootfs-genN). Do not
@@ -1292,42 +1349,38 @@ func crossNodeRestoreFromCreateContext(opts *workflow.CreateContext) bool {
 	return strings.EqualFold(strings.TrimSpace(raw), "true")
 }
 
-func attachExistingSnapshotRootfs(ctx context.Context, store cow.Store, backend, snapshotID string) (*cowVolume, error) {
-	refs := activateObjectRefs(ctx, backend, snapshotID)
-	var rootfs *CowObjectRef
-	for i := range refs {
-		if refs[i].Role == "rootfs" {
-			rootfs = &refs[i]
-			break
-		}
-	}
-	if rootfs == nil || strings.TrimSpace(rootfs.Name) == "" {
-		return nil, fmt.Errorf("%w: snapshot %s has no rootfs object", ErrCowObjectMissing, snapshotID)
-	}
-	info, err := store.GetVolumeInfo(ctx, rootfs.Name)
-	if err != nil {
+// SandboxRootfsName is the private rootfs a sandbox runs on, however it was
+// produced: cloned from a local package, or imported from S3 on a node that
+// has no package. The name is what destroy keys on.
+func SandboxRootfsName(sandboxID string, gen uint32) string {
+	return fmt.Sprintf("sb-%s-rootfs-gen%d", sandboxID, gen)
+}
+
+// SandboxMemoryName is the private memory image a cross-node restore imports.
+// Same-node restores read the package's own memory snapshot and must never
+// be given one of these: that disk belongs to the template or snapshot and
+// outlives every sandbox started from it.
+func SandboxMemoryName(sandboxID string) string {
+	return fmt.Sprintf("sb-%s-memory", strings.TrimSpace(sandboxID))
+}
+
+// importSandboxRootfs materializes the package rootfs as this sandbox's own
+// disk. Cross-node only: there is no local package to clone from, and
+// import_lvol produces a RW volume, so the import lands directly on the name
+// the sandbox would have cloned into.
+func importSandboxRootfs(ctx context.Context, store cow.Store, backend, sandboxID string,
+	uuids *cow.RemoteUUIDs, desiredSizeBytes uint64) (*cowVolume, error) {
+	_ = desiredSizeBytes
+	name := SandboxRootfsName(sandboxID, 0)
+	targets := []CowObjectRef{{Name: name, Kind: cowKindVolume, Role: "rootfs"}}
+	if err := FetchSnapshotAs(ctx, backend, targets, &cow.RemoteUUIDs{Rootfs: uuids.Rootfs}, true); err != nil {
 		return nil, err
 	}
-	if info == nil {
-		return nil, fmt.Errorf("%w: snapshot %s object %s", ErrCowObjectMissing, snapshotID, rootfs.Name)
-	}
-	dev, err := store.ResolveDevPath(ctx, rootfs.Name, rootfs.Kind)
+	dev, err := store.ResolveDevPath(ctx, name, cowKindVolume)
 	if err != nil {
-		// After cross-node import_lvol the object is a volume even if the
-		// catalog still records kind=snapshot from the export side.
-		if rootfs.Kind != cowKindVolume {
-			dev, err = store.ResolveDevPath(ctx, rootfs.Name, cowKindVolume)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("activate snapshot %s rootfs %s: %w", snapshotID, rootfs.Name, err)
-		}
-		return newCowVolume(rootfs.Name, cowKindVolume, 0, dev), nil
+		return nil, fmt.Errorf("resolve imported rootfs %s: %w", name, err)
 	}
-	kind := rootfs.Kind
-	if kind == "" {
-		kind = cowKindVolume
-	}
-	return newCowVolume(rootfs.Name, kind, 0, dev), nil
+	return newCowVolume(name, cowKindVolume, 0, dev), nil
 }
 
 func (l *local) dealCubeboxSnapV1Medium(ctx context.Context, opts *workflow.CreateContext, sandboxID, templateID, name, sizeStr string, result *StorageInfo) error {
@@ -1509,6 +1562,7 @@ func (l *local) destroy(ctx context.Context, info *StorageInfo, opts *workflow.D
 		if err := ReleaseS3MetadataVolume(ctx, backend, info.SandboxID); err != nil {
 			log.G(ctx).Warnf("destroy sandbox %s: release s3 metadata: %v", info.SandboxID, err)
 		}
+		l.releaseImportedMemoryVol(ctx, backend, info)
 		if home := SnapshotHome(backend, SnapshotKindNormal, info.SandboxID); home != "" {
 			if err := os.RemoveAll(home); err != nil && !os.IsNotExist(err) {
 				log.G(ctx).Warnf("destroy sandbox %s: remove package dir %s: %v", info.SandboxID, home, err)
@@ -1851,6 +1905,13 @@ type StorageInfo struct {
 	HostDirBackendInfos map[string]*HostDirBackendInfo `json:"hostDirBackendInfos,omitempty"`
 
 	RestoreMemoryVolURL string `json:"-"`
+
+	// ImportedMemoryVol is the memory disk a cross-node restore imported for
+	// this sandbox, and the only memory disk destroy may delete. Same-node
+	// restores leave it empty: they read the package's own memory snapshot,
+	// which outlives every sandbox started from it. Persisted, so a cubelet
+	// restart does not turn it into a leak.
+	ImportedMemoryVol string `json:"importedMemoryVol,omitempty"`
 
 	// PluginVolumeBackendInfos records the result of every plugin_volume attach.
 	// Keyed by Volume.name (the RunCubeSandboxRequest name, not volumeID).

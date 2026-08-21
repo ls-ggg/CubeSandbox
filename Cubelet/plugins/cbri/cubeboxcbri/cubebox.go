@@ -218,7 +218,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 				if isS3CatalogCreateBackend(backend) {
 					sandboxHome := storage.SnapshotHome(backend, storage.SnapshotKindNormal, childID)
 					metaMount := filepath.Join(sandboxHome, storage.SnapshotMetadataDir)
-					if err := storage.CloneS3MetadataFromParent(ctx, backend, templateID, childID, metaMount); err != nil {
+					if err := deriveChildS3Metadata(ctx, flowOpts, backend, templateID, childID, metaMount); err != nil {
 						return nil, ret.Err(errorcode.ErrorCode_AppSnapshotNotExist, err.Error())
 					}
 					if err := storage.EnsureShimSpecDirLink(sandboxHome, paths.ResDir); err != nil {
@@ -586,6 +586,36 @@ func pauseResumeCatalogBackend(flowOpts *workflow.CreateContext) string {
 func isS3CatalogCreateBackend(backend string) bool {
 	normalized, err := cow.NormalizeBackend(backend)
 	return err == nil && normalized == cow.BackendS3
+}
+
+// deriveChildS3Metadata gives the new sandbox its own metadata disk, seeded
+// from the template or snapshot it starts from. Same-node that is a clone of
+// the parent's disk; cross-node there is no parent disk here, so the same
+// content is imported from S3 under the sandbox's name. Either way the child
+// owns what it mounts and never writes on a parent's metadata.
+func deriveChildS3Metadata(ctx context.Context, flowOpts *workflow.CreateContext,
+	backend, parentID, childID, mountPath string) error {
+	if uuid := crossNodeMetadataUUID(flowOpts); uuid != "" {
+		return storage.ImportS3MetadataForSandbox(ctx, backend, childID, uuid, mountPath)
+	}
+	return storage.CloneS3MetadataFromParent(ctx, backend, parentID, childID, mountPath)
+}
+
+// crossNodeMetadataUUID returns the package's metadata export id when Master
+// says it placed this restore on a node holding no replica, and "" otherwise.
+func crossNodeMetadataUUID(flowOpts *workflow.CreateContext) string {
+	if flowOpts == nil || flowOpts.ReqInfo == nil {
+		return ""
+	}
+	annotations := flowOpts.ReqInfo.GetAnnotations()
+	if !strings.EqualFold(strings.TrimSpace(annotations[constants.MasterAnnotationSnapshotCrossNode]), "true") {
+		return ""
+	}
+	uuids := cow.ParseRemoteUUIDs(annotations[constants.MasterAnnotationSnapshotRemoteUUIDs])
+	if uuids == nil {
+		return ""
+	}
+	return strings.TrimSpace(uuids.Metadata)
 }
 
 func pauseCatalogMetaDir(ctx context.Context, snapID, preferred string) string {

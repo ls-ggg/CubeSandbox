@@ -107,6 +107,28 @@ func FetchSnapshot(ctx context.Context, backend, snapshotID string, uuids *cow.R
 	return fetcher.Fetch(ctx, snapshotID, uuids, activate)
 }
 
+// FetchSnapshotAs imports remote_uuids into the local names the caller
+// picks, one target per role. See [S3Cow.FetchAs]: cross-node sandboxes
+// import their own private copies instead of the package's names.
+func FetchSnapshotAs(ctx context.Context, backend string, targets []CowObjectRef, uuids *cow.RemoteUUIDs, activate bool) error {
+	normalized, err := cow.NormalizeBackend(backend)
+	if err != nil {
+		return err
+	}
+	if normalized != cow.BackendS3 {
+		return fmt.Errorf("fetch is s3-only, got backend %s", normalized)
+	}
+	store, err := requireCowStoreFor(cow.BackendS3)
+	if err != nil {
+		return err
+	}
+	s3, ok := store.(*S3Cow)
+	if !ok || s3 == nil {
+		return fmt.Errorf("s3 cow store does not implement fetch")
+	}
+	return s3.FetchAs(ctx, targets, uuids, activate)
+}
+
 // ActivateSnapshot opens a local snapshot's cubecow objects on the Store
 // for backend. Missing objects fail; this does not fetch from remote
 // (use FetchSnapshot for that). Does not start a sandbox. Callers decide

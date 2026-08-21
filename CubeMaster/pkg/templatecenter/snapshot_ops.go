@@ -1254,6 +1254,17 @@ func generateSnapshotID() string {
 	return snapshotIDPrefix + strings.ReplaceAll(uuid.New().String(), "-", "")[:24]
 }
 
+func isSnapshotDefinition(def *models.TemplateDefinition) bool {
+	if def == nil {
+		return false
+	}
+	kind := strings.TrimSpace(def.Kind)
+	if kind == "" {
+		return false
+	}
+	return strings.EqualFold(kind, TemplateKindSnapshot)
+}
+
 func maxUint64(a, b uint64) uint64 {
 	if a > b {
 		return a

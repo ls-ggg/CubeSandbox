@@ -31,20 +31,21 @@ func IsPackageLocal(ctx context.Context, backend, snapshotID string) (bool, erro
 	return false, nil
 }
 
-// EnsureRemotePackageLocal imports a template／snapshot／pause package onto a
-// node that does not have it, so everything downstream of Create keeps
+// EnsureRemotePackageLocal makes a template／snapshot／pause package readable
+// on a node that does not have it, so everything downstream of Create keeps
 // reading the local catalog exactly the way it does on the origin node.
 // It reports whether an import actually happened.
 //
-// Order matters. catalog.json and sandbox_spec.json live on the package
-// metadata disk, so metadata has to be imported and mounted before the catalog
-// can name the rootfs and memory objects. Importing those two first would have
-// to guess their names from the package id, and the guess would then disagree
-// with the catalog that gets mounted on top of it.
+// Only the metadata disk is imported, and it stands for the package itself:
+// catalog.json, sandbox_spec.json and the kernel／image config all live on it.
+// The rootfs and memory are not fetched here — each sandbox imports its own
+// private copy of those (see [SandboxRootfsName], [SandboxMemoryName],
+// [ImportS3MetadataForSandbox]), so that one sandbox cannot consume the
+// node's only copy of a snapshot other creates still need.
 //
 // Re-entrant on every level: a package that is already here returns early, and
-// a retry after a partial import skips the objects cubecow already has. Same
-// node Resume carries the same remote_uuids and imports nothing.
+// a retry after a partial import skips what cubecow already has. Same node
+// Resume carries the same remote_uuids and imports nothing.
 func EnsureRemotePackageLocal(ctx context.Context, backend, snapshotID string, pause bool, uuids *cow.RemoteUUIDs) (bool, error) {
 	if !isS3CatalogBackend(backend) {
 		return false, nil
@@ -69,19 +70,16 @@ func EnsureRemotePackageLocal(ctx context.Context, backend, snapshotID string, p
 		return false, fmt.Errorf("ensure remote package dirs for %s: %w", id, err)
 	}
 	metaOnly := &cow.RemoteUUIDs{Metadata: strings.TrimSpace(uuids.Metadata)}
-	if !metaOnly.Empty() {
-		if err := FetchSnapshot(ctx, cow.BackendS3, id, metaOnly, false); err != nil {
-			return false, fmt.Errorf("fetch remote metadata for %s: %w", id, err)
-		}
-		if err := MountS3MetadataAt(ctx, cow.BackendS3, id, filepath.Join(home, SnapshotMetadataDir)); err != nil {
-			return false, fmt.Errorf("mount remote metadata for %s: %w", id, err)
-		}
+	if metaOnly.Empty() {
+		// Packages exported before metadata was part of the payload: nothing
+		// to mount, and the catalog falls back to id-derived names.
+		return false, nil
 	}
-	// Object names now come from the imported catalog. Packages exported
-	// before metadata was part of the payload have no catalog to mount and
-	// fall back to id-derived names, which is what they were written with.
-	if err := FetchSnapshot(ctx, cow.BackendS3, id, uuids, false); err != nil {
-		return false, fmt.Errorf("fetch remote package %s: %w", id, err)
+	if err := FetchSnapshot(ctx, cow.BackendS3, id, metaOnly, false); err != nil {
+		return false, fmt.Errorf("fetch remote metadata for %s: %w", id, err)
+	}
+	if err := MountS3MetadataAt(ctx, cow.BackendS3, id, filepath.Join(home, SnapshotMetadataDir)); err != nil {
+		return false, fmt.Errorf("mount remote metadata for %s: %w", id, err)
 	}
 	return true, nil
 }

@@ -45,6 +45,23 @@ type fakeCowEngine struct {
 	exportSnapshots             []string
 	exportUUIDPrefix            string
 	exportErr                   error
+	importedLvols               [][2]string
+	importErr                   error
+}
+
+// ImportLvol makes the fake a cowVolumeImporter: cross-node create imports
+// each disk under the sandbox's own name.
+func (f *fakeCowEngine) ImportLvol(name, remoteUUID string) (string, error) {
+	f.importedLvols = append(f.importedLvols, [2]string{name, remoteUUID})
+	if f.importErr != nil {
+		return "", f.importErr
+	}
+	path := "/dev/mapper/" + name
+	if f.volumeInfos == nil {
+		f.volumeInfos = map[string]*cubecow.Volume{}
+	}
+	f.volumeInfos[name] = &cubecow.Volume{DevicePath: path, SizeBytes: 8 << 20}
+	return path, nil
 }
 
 func (f *fakeCowEngine) CreateVolume(name string, sizeBytes uint64) (string, error) {

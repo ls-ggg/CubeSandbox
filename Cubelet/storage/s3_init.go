@@ -38,6 +38,11 @@ func (l *local) startS3CowInitLoop(parent context.Context) {
 	l.stopS3CowInitLoop()
 	ctx, cancel := context.WithCancel(parent)
 	l.s3InitCancel = cancel
+	// Warn, not info: cubelet drops the log level to the configured one
+	// (warn on our nodes) as soon as boot finishes, which is about when
+	// this loop starts. At info, both ends of the window would vanish and
+	// a node stuck without s3lvol would look identical to a healthy one.
+	CubeLog.Warnf("s3 cubecow init loop starting; s3 requests fail with %v until it succeeds", ErrS3NotReady)
 	go l.runS3CowInitLoop(ctx)
 }
 
@@ -50,12 +55,15 @@ func (l *local) stopS3CowInitLoop() {
 }
 
 func (l *local) runS3CowInitLoop(ctx context.Context) {
-	for {
+	start := time.Now()
+	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
+			CubeLog.Warnf("s3 cubecow init loop stopped before attempt %d: %v", attempt, ctx.Err())
 			return
 		}
+		CubeLog.Infof("s3 cubecow init attempt %d", attempt)
 		if err := l.tryS3CowInitOnce(ctx); err != nil {
-			CubeLog.Errorf("s3 cubecow init attempt fail (retry in %s): %v", s3InitRetryInterval, err)
+			CubeLog.Errorf("s3 cubecow init attempt %d fail (retry in %s): %v", attempt, s3InitRetryInterval, err)
 			select {
 			case <-ctx.Done():
 				return
@@ -63,7 +71,8 @@ func (l *local) runS3CowInitLoop(ctx context.Context) {
 			}
 			continue
 		}
-		CubeLog.Infof("cubecow s3 handle and metadata base ready")
+		CubeLog.Warnf("cubecow s3 handle and metadata base ready after %d attempt(s) in %s; s3 requests now served",
+			attempt, time.Since(start).Round(time.Millisecond))
 		// Boot recovery may have run before this handle existed and skipped
 		// every s3-backed entry. Redo that pass now; it is idempotent, and
 		// at this point the node is already serving, so a failure here is
@@ -86,6 +95,7 @@ func (l *local) tryS3CowInitOnce(ctx context.Context) error {
 		return ctx.Err()
 	}
 	if l.s3CowManager != nil && l.s3CowEngine != nil {
+		CubeLog.Infof("s3 cubecow handle already published; nothing to do")
 		return nil
 	}
 
@@ -97,6 +107,9 @@ func (l *local) tryS3CowInitOnce(ctx context.Context) error {
 	}
 	mgr := newS3CowVolumeManager(engine)
 
+	// Logged as its own step: it talks to s3lvol and is where a wedged
+	// backend leaves the loop sitting, with the handle not yet published.
+	CubeLog.Infof("s3 cubecow handle open (%s); ensuring metadata base", source)
 	setS3CowOverride(mgr)
 	metaErr := ensureS3MetadataReadyFn(ctx)
 	setS3CowOverride(nil)
