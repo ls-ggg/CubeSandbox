@@ -363,10 +363,6 @@ func (l *local) init(ic *plugin.InitContext) error {
 		if err := l.ensureCowManager(); err != nil {
 			return err
 		}
-		// Bring S3 up before recovery: recovery resolves each sandbox's
-		// device paths through its own backend, so an s3-backed sandbox
-		// needs the S3 handle to already exist.
-		l.initS3CowSync(ic.Context)
 		if err := l.RecoverStorageState(ic.Context); err != nil {
 			return err
 		}

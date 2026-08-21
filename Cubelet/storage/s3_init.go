@@ -31,36 +31,8 @@ var (
 	s3CowOverride   *S3Cow
 )
 
-// initS3CowSync brings the S3 handle and metadata base up before the rest
-// of storage init proceeds, so nothing downstream — boot recovery above all
-// — has to cope with a backend that exists only later.
-//
-// One attempt, not a retry loop: where s3lvol is running this succeeds
-// outright, and where it is absent (xfs-only nodes) retrying would delay
-// every startup for a handle nobody asks for. A failure hands off to
-// [local.startS3CowInitLoop] and is never fatal.
-func (l *local) initS3CowSync(ctx context.Context) {
-	if l == nil || !l.useCowStorage() || l.s3CowManager != nil {
-		// A manager already present means the handle came from somewhere
-		// else — a previous init, or an injected one. tryS3CowInitOnce
-		// would drop it and build its own.
-		return
-	}
-	if err := l.tryS3CowInitOnce(ctx); err != nil {
-		CubeLog.Errorf("s3 cubecow init fail (background retry every %s takes over): %v",
-			s3InitRetryInterval, err)
-		return
-	}
-	CubeLog.Infof("cubecow s3 handle and metadata base ready before storage recovery")
-}
-
 func (l *local) startS3CowInitLoop(parent context.Context) {
 	if l == nil || !l.useCowStorage() {
-		return
-	}
-	if l.s3CowManager != nil {
-		// Synchronous init already published the handle (or a test injected
-		// one); retrying would only tear it down and rebuild it.
 		return
 	}
 	l.stopS3CowInitLoop()
