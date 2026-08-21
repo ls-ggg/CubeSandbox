@@ -73,9 +73,12 @@ type SnapshotCatalogEntry struct {
 	CreatedAt string `json:"created_at,omitempty"`
 	// Backend is xfs|s3. Empty on legacy catalog.json means xfs.
 	Backend string `json:"backend,omitempty"`
-	// RemoteUUIDs are cubecow_export_snapshot ids for each disk role.
-	// Required for cross-node cubecow_import_lvol. Empty on xfs.
-	RemoteUUIDs *cow.RemoteUUIDs `json:"remote_uuids,omitempty"`
+	// No remote_uuids here. Export ids are node-local and are only known
+	// after the package is sealed, when this catalog lives on a read-only
+	// metadata snapshot: writing them would land a second, divergent copy
+	// on the host under the unmounted mount point. cubecow records the id
+	// on the object itself (GetVolumeInfo.ExportUUID), which is the one
+	// place that survives both sealing and a restart.
 }
 
 // ExtInfoRemoteUUIDs is the Update/Pause ext_info key carrying remote_uuids JSON.

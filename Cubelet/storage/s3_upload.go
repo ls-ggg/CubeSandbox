@@ -72,10 +72,11 @@ func (m *S3Cow) Upload(ctx context.Context, snapshotID string) (*cow.RemoteUUIDs
 		m.setUpload(id, cow.RemoteStateFailed, "empty remote_uuids", nil)
 		return nil, fmt.Errorf("s3 export returned empty remote_uuids for %s", id)
 	}
-	if entry, err := GetLocalSnapshotFor(ctx, cow.BackendS3, id); err == nil && entry != nil {
-		entry.RemoteUUIDs = uuids
-		_ = WriteSnapshotCatalogFor(cow.BackendS3, entry)
-	}
+	// Not persisted to catalog.json: by now the package is sealed and its
+	// catalog lives on a read-only metadata snapshot, so the write would go
+	// to the bare mount point on the host and shadow the real one. cubecow
+	// keeps the id on the object, and UploadStatus reads it back from there.
+	//
 	// Export accepted; upload may still be in flight on the S3 backend.
 	m.setUpload(id, cow.RemoteStateRunning, "export started", uuids)
 	return uuids, nil
@@ -117,13 +118,6 @@ func (m *S3Cow) UploadTemplateRootfs(ctx context.Context, snapshotID string) (st
 	// its objects are committed, and nothing later in template creation
 	// waits on this.
 	m.waitExportSettled(ctx, rootfs, uuid, time.Now().Add(exportSettleBudget))
-	if entry, err := GetLocalSnapshotFor(ctx, cow.BackendS3, id); err == nil && entry != nil {
-		if entry.RemoteUUIDs == nil {
-			entry.RemoteUUIDs = &cow.RemoteUUIDs{}
-		}
-		entry.RemoteUUIDs.Rootfs = uuid
-		_ = WriteSnapshotCatalogFor(cow.BackendS3, entry)
-	}
 	return uuid, nil
 }
 
@@ -212,6 +206,8 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 		State:      cow.RemoteStatePending,
 	}
 
+	// No in-memory entry (a restart drops them) is not a gap: the per-object
+	// loop below reads each export id straight from cubecow.
 	m.uploadLock.Lock()
 	entry, ok := m.uploadStates[id]
 	m.uploadLock.Unlock()
@@ -222,8 +218,6 @@ func (m *S3Cow) UploadStatus(ctx context.Context, snapshotID string) (*cow.Remot
 			st.Message = entry.message
 			return st, nil
 		}
-	} else if cat, err := GetLocalSnapshotFor(ctx, cow.BackendS3, id); err == nil && cat != nil && !cat.RemoteUUIDs.Empty() {
-		st.RemoteUUIDs = cat.RemoteUUIDs
 	}
 
 	refs := activateObjectRefs(ctx, cow.BackendS3, id)

@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -354,12 +355,11 @@ func TestUploadTemplateRootfsExportsOnlyRootfs(t *testing.T) {
 	require.NotContains(t, engine.exportSnapshots, "tpl-tpl-1-memory-snap")
 	require.NotContains(t, engine.exportSnapshots, S3MetadataSnapshotName("tpl-1"))
 
-	entry, err := GetLocalSnapshotFor(context.Background(), cow.BackendS3, "tpl-1")
+	// The id belongs on the object, not in catalog.json: by export time the
+	// package is sealed and its catalog is read-only.
+	raw, err := os.ReadFile(filepath.Join(home, SnapshotMetadataDir, snapshotCatalogFileName))
 	require.NoError(t, err)
-	require.NotNil(t, entry.RemoteUUIDs)
-	require.Equal(t, uuid, entry.RemoteUUIDs.Rootfs)
-	require.Empty(t, entry.RemoteUUIDs.Memory)
-	require.Empty(t, entry.RemoteUUIDs.Metadata)
+	require.NotContains(t, string(raw), "remote_uuids")
 }
 
 func TestUploadTemplateRootfsIsNoOpOnXFS(t *testing.T) {
