@@ -98,6 +98,38 @@ func TestQueryHostFactCandidates_MatchesRequiredKeys(t *testing.T) {
 	}
 }
 
+func TestQueryHostFactCandidates_SameKernelDifferentCPUIDRejected(t *testing.T) {
+	db := newHostFactsQueryDB(t)
+	seedNode(t, db, "origin-like", "10.0.0.1", x86Facts(), true, true)
+	otherCPU := x86Facts()
+	otherCPU.CPUIDHash = "sha256:other-sku"
+	seedNode(t, db, "other-cpu", "10.0.0.2", otherCPU, true, true)
+
+	got, err := QueryHostFactCandidates(context.Background(), "sha256:x86", "5.15.0", false)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 1 || got[0].NodeID != "origin-like" {
+		t.Fatalf("same kernel + different cpuid_hash must not match, got %+v", got)
+	}
+}
+
+func TestQueryHostFactCandidates_SameCPUIDDifferentKernelRejected(t *testing.T) {
+	db := newHostFactsQueryDB(t)
+	seedNode(t, db, "origin-like", "10.0.0.1", x86Facts(), true, true)
+	otherKernel := x86Facts()
+	otherKernel.HostKernelRelease = "6.1.0-generic"
+	seedNode(t, db, "other-kernel", "10.0.0.2", otherKernel, true, true)
+
+	got, err := QueryHostFactCandidates(context.Background(), "sha256:x86", "5.15.0", false)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 1 || got[0].NodeID != "origin-like" {
+		t.Fatalf("same cpuid_hash + different host_kernel_release must not match, got %+v", got)
+	}
+}
+
 // aarch64: cpu_vendor/cpu_model are empty, but the required-key predicate still
 // discriminates on cpuid_hash + host_kernel_release, so an ARM node is matched.
 func TestQueryHostFactCandidates_ARMMatchesOnRequiredKeys(t *testing.T) {
